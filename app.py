@@ -817,10 +817,24 @@ with tab2:
                 "Bypass mask (full image)", value=False, key="gif_bypass",
                 help="Unchecked = auto-detect mask to protect subject",
             )
+        custom_mask_path = None
+        if not bypass_mask:
+            mask_upload = st.file_uploader(
+                "Upload custom mask (optional — white = protected, black = glitch)",
+                type=["png", "jpg", "jpeg"],
+                key="gif_mask_upload",
+                help="Override auto-detect: white areas protect subject, black areas get effects.",
+            )
+            if mask_upload:
+                _mtmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+                _mtmp.write(mask_upload.read())
+                _mtmp.close()
+                custom_mask_path = _mtmp.name
+                st.success("Custom mask loaded — white areas will be protected from effects.")
+            else:
+                st.caption("No mask uploaded — using auto-detect (edge detection) to protect subject.")
         static_frames = 6
         output_size = RESOLUTION_OPTIONS[resolution]
-        if not bypass_mask:
-            st.caption("Using auto-detect mask (edge detection) to protect subject from glitch effects.")
 
         st.markdown("### Generate Glitched GIF")
         if st.button("⚡ GENERATE GLITCHED GIF ⚡", use_container_width=True, key="gen_gif"):
@@ -842,7 +856,7 @@ with tab2:
                     static_frames_per_image=static_frames,
                     progress_callback=update_progress,
                     bypass_mask=bypass_mask,
-                    mask_path=None,
+                    mask_path=custom_mask_path,
                     output_size=output_size,
                     use_dithering=use_dithering,
                 )

@@ -48,6 +48,9 @@ def transition_band_wipe(
         band_t = max(0, min(1, (t * (n_bands + 1) - i) / 1.5))
         reveal[y0:y1, :] = band_t
     reveal = np.clip(reveal * (0.7 + 0.3 * jagged), 0, 1)
+    _, mask_bin = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
+    subject_region = (mask_bin > 127).astype(np.float32)
+    reveal = reveal * (1.0 - subject_region * 0.7)
     blend = frame_a.astype(np.float32) * (1 - reveal[:, :, np.newaxis]) + frame_b.astype(np.float32) * reveal[:, :, np.newaxis]
     return np.clip(blend, 0, 255).astype(np.uint8)
 
@@ -78,6 +81,9 @@ def transition_diagonal_rip(
     rim_glow = np.exp(-np.abs(np.abs(dist) - band_thick) / 3).astype(np.float32)
     reveal = in_band.astype(np.float32) + 0.3 * rim_glow
     reveal = np.clip(reveal * (0.3 + 0.7 * t), 0, 1)
+    _, mask_bin = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
+    subject_region = (mask_bin > 127).astype(np.float32)
+    reveal = reveal * (1.0 - subject_region * 0.7)
     blend = frame_a.astype(np.float32) * (1 - reveal[:, :, np.newaxis]) + frame_b.astype(np.float32) * reveal[:, :, np.newaxis]
     glow = np.array([60, 120, 180], dtype=np.float32)
     blend = blend + rim[:, :, np.newaxis].astype(np.float32) * glow * (0.15 * intensity * t)
@@ -210,19 +216,20 @@ def transition_voronoi_shatter_swap(
     pts[:, 0] = np.clip(pts[:, 0], 0, h - 1)
     pts[:, 1] = np.clip(pts[:, 1], 0, w - 1)
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
-    dist_map = np.full((h, w), 1e9, dtype=np.float32)
-    id_map = np.zeros((h, w), dtype=np.int32)
+    all_dists = np.empty((n_pts, h, w), dtype=np.float32)
     for i, (py, px) in enumerate(pts):
-        d = (yy - py) ** 2 + (xx - px) ** 2
-        closer = d < dist_map
-        dist_map[closer] = d[closer]
-        id_map[closer] = i
+        all_dists[i] = (yy - py) ** 2 + (xx - px) ** 2
+    id_map = np.argmin(all_dists, axis=0)
+    _, mask_bin = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
+    subject_region = (mask_bin > 127)
     out = frame_a.copy().astype(np.float32)
     flip_chance = t * (0.6 + 0.4 * intensity / 10)
     for i in range(n_pts):
         if np.random.rand() > flip_chance:
             continue
-        cell = id_map == i
+        cell = (id_map == i) & ~subject_region
+        if not cell.any():
+            continue
         ox = int(np.clip(np.random.randn() * 2, -4, 4))
         oy = int(np.clip(np.random.randn() * 2, -4, 4))
         src = np.roll(np.roll(frame_b, ox, axis=1), oy, axis=0)
@@ -263,21 +270,18 @@ def transition_palette_snap_posterize(
     intensity: int,
     seed: int = 0,
 ) -> np.ndarray:
-    """
-    One boundary frame: posterize to 4-6 luminance levels, then snap to B.
-    Signal resync feel. 1 frame only.
-    """
+    """Smooth posterize crossfade: posterization strength ramps with t, then blends into B."""
     frame_a, frame_b = _ensure_same_shape(frame_a, frame_b)
-    if t < 0.5:
-        levels = max(4, 8 - intensity // 2)
-        gray = cv2.cvtColor(frame_a, cv2.COLOR_BGR2GRAY)
-        posterized = (gray // (256 // levels)) * (256 // levels)
-        posterized = np.clip(posterized, 0, 255).astype(np.uint8)
-        ratio = (posterized.astype(np.float32) + 1) / (gray.astype(np.float32) + 1)
-        out = np.clip(frame_a.astype(np.float32) * ratio[:, :, np.newaxis], 0, 255).astype(np.uint8)
-    else:
-        out = frame_b
-    return out
+    levels = max(4, int(12 - intensity * t * 0.8))
+    gray = cv2.cvtColor(frame_a, cv2.COLOR_BGR2GRAY)
+    posterized = (gray // max(1, 256 // levels)) * (256 // levels)
+    posterized = np.clip(posterized, 0, 255).astype(np.uint8)
+    ratio = (posterized.astype(np.float32) + 1) / (gray.astype(np.float32) + 1)
+    a_posterized = np.clip(frame_a.astype(np.float32) * ratio[:, :, np.newaxis], 0, 255)
+    posterize_amt = min(1.0, t * 1.5)
+    a_blended = (1 - posterize_amt) * frame_a.astype(np.float32) + posterize_amt * a_posterized
+    out = (1 - t) * a_blended + t * frame_b.astype(np.float32)
+    return np.clip(out, 0, 255).astype(np.uint8)
 
 
 def transition_chroma_dropout_rebound(
@@ -288,26 +292,19 @@ def transition_chroma_dropout_rebound(
     intensity: int,
     seed: int = 0,
 ) -> np.ndarray:
-    """
-    Boundary: near-monochrome (drop chroma). Next frame: oversat cyan/magenta rebound.
-    VHS-authentic, rare-feeling.
-    """
+    """Chroma dropout with A->B crossfade: desaturate, then oversaturate while blending into B."""
     frame_a, frame_b = _ensure_same_shape(frame_a, frame_b)
+    base = (1 - t) * frame_a.astype(np.float32) + t * frame_b.astype(np.float32)
+    base = np.clip(base, 0, 255).astype(np.uint8)
+    yuv = cv2.cvtColor(base, cv2.COLOR_BGR2YUV)
+    y, u, v = cv2.split(yuv)
     if t < 0.5:
-        yuv = cv2.cvtColor(frame_b, cv2.COLOR_BGR2YUV)
-        y, u, v = cv2.split(yuv)
-        drop = 0.15 + 0.1 * (1 - t * 2)
-        u_new = np.clip(128 + (u.astype(np.float32) - 128) * drop, 0, 255).astype(np.uint8)
-        v_new = np.clip(128 + (v.astype(np.float32) - 128) * drop, 0, 255).astype(np.uint8)
-        out = cv2.cvtColor(cv2.merge([y, u_new, v_new]), cv2.COLOR_YUV2BGR)
+        chroma_scale = 0.15 + 0.85 * (t * 2)
     else:
-        yuv = cv2.cvtColor(frame_b, cv2.COLOR_BGR2YUV)
-        y, u, v = cv2.split(yuv)
-        boost = 1.0 + min(1.5, intensity * 0.12 * (t - 0.5) * 2)
-        u_new = np.clip(128 + (u.astype(np.float32) - 128) * boost, 0, 255).astype(np.uint8)
-        v_new = np.clip(128 + (v.astype(np.float32) - 128) * boost, 0, 255).astype(np.uint8)
-        out = cv2.cvtColor(cv2.merge([y, u_new, v_new]), cv2.COLOR_YUV2BGR)
-    return out
+        chroma_scale = 1.0 + min(1.5, intensity * 0.12 * (t - 0.5) * 2)
+    u_new = np.clip(128 + (u.astype(np.float32) - 128) * chroma_scale, 0, 255).astype(np.uint8)
+    v_new = np.clip(128 + (v.astype(np.float32) - 128) * chroma_scale, 0, 255).astype(np.uint8)
+    return cv2.cvtColor(cv2.merge([y, u_new, v_new]), cv2.COLOR_YUV2BGR)
 
 
 def transition_scanline_gate(
@@ -348,27 +345,22 @@ def transition_micro_jitter_rgb(
     intensity: int,
     seed: int = 0,
 ) -> np.ndarray:
-    """
-    1 boundary frame: 1-2px jitter + tiny RGB split. Next frame stable in B.
-    Hit without chaos.
-    """
+    """Smooth jitter + RGB split that ramps with t, blending A->B underneath."""
     frame_a, frame_b = _ensure_same_shape(frame_a, frame_b)
     h, w = frame_b.shape[:2]
     np.random.seed(seed)
-    if t < 0.5:
-        jx = np.random.randint(-2, 3)
-        jy = np.random.randint(-2, 3)
-        shifted = np.roll(np.roll(frame_b, jx, axis=1), jy, axis=0)
-        b, g, r = cv2.split(shifted)
-        split = max(1, intensity // 3)
-        out = cv2.merge([
-            np.roll(b, -split, axis=1),
-            g,
-            np.roll(r, split, axis=1),
-        ])
-    else:
-        out = frame_b
-    return np.clip(out, 0, 255).astype(np.uint8)
+    base = (1 - t) * frame_a.astype(np.float32) + t * frame_b.astype(np.float32)
+    base = np.clip(base, 0, 255).astype(np.uint8)
+    jitter_amt = max(0, 1.0 - t * 1.5)
+    jx = int(np.random.randint(-2, 3) * jitter_amt)
+    jy = int(np.random.randint(-2, 3) * jitter_amt)
+    if jx != 0 or jy != 0:
+        base = np.roll(np.roll(base, jx, axis=1), jy, axis=0)
+    split = max(1, int(intensity // 3 * jitter_amt))
+    if split > 0:
+        b, g, r = cv2.split(base)
+        base = cv2.merge([np.roll(b, -split, axis=1), g, np.roll(r, split, axis=1)])
+    return np.clip(base, 0, 255).astype(np.uint8)
 
 
 def transition_noise_threshold_crossfade(

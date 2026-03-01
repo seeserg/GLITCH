@@ -10,6 +10,31 @@ from typing import Optional, Tuple, Callable
 from dataclasses import dataclass
 
 
+def _perlin_noise_2d(h, w, scale=8.0, octaves=4, seed=0):
+    """Smooth 2D value noise with octave layering. Returns float32 in [0, 1]."""
+    rng = np.random.RandomState(seed)
+    noise = np.zeros((h, w), dtype=np.float32)
+    amplitude = 1.0
+    total_amp = 0.0
+    freq = scale
+    for _ in range(octaves):
+        gh = max(2, int(h / freq) + 2)
+        gw = max(2, int(w / freq) + 2)
+        grid = rng.rand(gh, gw).astype(np.float32)
+        layer = cv2.resize(grid, (w, h), interpolation=cv2.INTER_CUBIC)
+        noise += layer * amplitude
+        total_amp += amplitude
+        amplitude *= 0.5
+        freq *= 0.5
+    return np.clip(noise / total_amp, 0, 1)
+
+
+def _subpixel_shift(channel, dx, dy, w, h):
+    """Shift a channel by fractional pixel amounts with bicubic interpolation."""
+    M = np.float32([[1, 0, dx], [0, 1, dy]])
+    return cv2.warpAffine(channel, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+
+
 @dataclass
 class GlitchParams:
     """Parameters for all glitch effects."""
@@ -78,11 +103,27 @@ class GlitchParams:
     transition_scanline_gate: int = 0
     transition_micro_jitter_rgb: int = 0
     transition_noise_threshold_crossfade: int = 0
+    # New CPU effects
+    displacement_map: int = 0
+    color_halftone: int = 0
+    temporal_echo: int = 0
     # GLSL shaders
     shader_necrotic_iridescent_flow_intensity: int = 0
     shader_hexagonal_warp_intensity: int = 0
     shader_caustic_flow_intensity: int = 0
     shader_thermal_distort_intensity: int = 0
+    shader_void_tendrils_intensity: int = 0
+    shader_spectral_prism_intensity: int = 0
+    shader_soul_fire_intensity: int = 0
+    shader_electric_arc_intensity: int = 0
+    shader_dimensional_rift_intensity: int = 0
+    shader_glitch_hologram_intensity: int = 0
+    shader_crystalline_frost_intensity: int = 0
+    shader_pixel_rain_intensity: int = 0
+    shader_liquid_metal_intensity: int = 0
+    shader_data_corruption_intensity: int = 0
+    shader_vhs_rewind_intensity: int = 0
+    shader_holographic_foil_intensity: int = 0
 
 
 # Event scheduler: keyframed glitch moments (subtle -> event -> decay)
@@ -181,52 +222,63 @@ def vary_params_for_frame(params: GlitchParams, frame_idx: int, total_frames: in
         transition_scanline_gate=params.transition_scanline_gate,
         transition_micro_jitter_rgb=params.transition_micro_jitter_rgb,
         transition_noise_threshold_crossfade=params.transition_noise_threshold_crossfade,
+        displacement_map=scale(params.displacement_map),
+        color_halftone=scale(params.color_halftone),
+        temporal_echo=scale(params.temporal_echo),
         shader_necrotic_iridescent_flow_intensity=scale(params.shader_necrotic_iridescent_flow_intensity),
         shader_hexagonal_warp_intensity=scale(params.shader_hexagonal_warp_intensity),
         shader_caustic_flow_intensity=scale(params.shader_caustic_flow_intensity),
         shader_thermal_distort_intensity=scale(params.shader_thermal_distort_intensity),
+        shader_void_tendrils_intensity=scale(params.shader_void_tendrils_intensity),
+        shader_spectral_prism_intensity=scale(params.shader_spectral_prism_intensity),
+        shader_soul_fire_intensity=scale(params.shader_soul_fire_intensity),
+        shader_electric_arc_intensity=scale(params.shader_electric_arc_intensity),
+        shader_dimensional_rift_intensity=scale(params.shader_dimensional_rift_intensity),
+        shader_glitch_hologram_intensity=scale(params.shader_glitch_hologram_intensity),
+        shader_crystalline_frost_intensity=scale(params.shader_crystalline_frost_intensity),
+        shader_pixel_rain_intensity=scale(params.shader_pixel_rain_intensity),
+        shader_liquid_metal_intensity=scale(params.shader_liquid_metal_intensity),
+        shader_data_corruption_intensity=scale(params.shader_data_corruption_intensity),
+        shader_vhs_rewind_intensity=scale(params.shader_vhs_rewind_intensity),
+        shader_holographic_foil_intensity=scale(params.shader_holographic_foil_intensity),
     )
 
 
 def apply_rgb_channel_shift(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos: float, frame_idx: int) -> np.ndarray:
-    """RGB channel shifts: sub-pixel stepped (1–3px), band-limited. Rare-tier: shift only highlights (edges)."""
+    """RGB channel shifts with sub-pixel precision. Rare-tier: shift only highlights (edges)."""
     h, w = frame.shape[:2]
     np.random.seed(frame_idx * 7919)
-    # Sub-pixel stepped (1–3px) and band-limited
-    base_step = 1 + (intensity % 3)  # 1–3px
-    shift_x = int(base_step * (1 + intensity * 0.3) * (0.7 + chaos * 0.6))
-    shift_y = int(base_step * 0.5 * (1 + intensity * 0.2) * (0.7 + chaos * 0.6))
-    shift_x = max(1, min(shift_x, 12))
-    shift_y = max(0, min(shift_y, 6))
+    base_step = 1 + (intensity % 3)
+    shift_x = base_step * (1 + intensity * 0.3) * (0.7 + chaos * 0.6)
+    shift_y = base_step * 0.5 * (1 + intensity * 0.2) * (0.7 + chaos * 0.6)
+    shift_x = max(0.5, min(shift_x, 12.0))
+    shift_y = max(0.0, min(shift_y, 6.0))
 
     b, g, r = cv2.split(frame)
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray, 80, 150)
     edge_weight = edges.astype(np.float32) / 255.0
 
-    # Rare-tier: intensity >= 5 → shift only on edges (highlights)
     if intensity >= 5:
         edge_weight = np.clip(edge_weight * 1.5, 0, 1)
         edge_3ch = np.stack([edge_weight, edge_weight, edge_weight], axis=-1)
     else:
         edge_3ch = np.ones((h, w, 3), dtype=np.float32)
 
-    M_r = np.float32([[1, 0, shift_x], [0, 1, shift_y]])
-    M_b = np.float32([[1, 0, -shift_x], [0, 1, -shift_y]])
-    r_shifted = cv2.warpAffine(r, M_r, (w, h), borderMode=cv2.BORDER_REPLICATE)
-    b_shifted = cv2.warpAffine(b, M_b, (w, h), borderMode=cv2.BORDER_REPLICATE)
+    r_shifted = _subpixel_shift(r, shift_x, shift_y, w, h)
+    b_shifted = _subpixel_shift(b, -shift_x, -shift_y, w, h)
     glitched = cv2.merge([b_shifted, g, r_shifted])
     blended = (edge_3ch * glitched.astype(np.float32) + (1 - edge_3ch) * frame.astype(np.float32)).astype(np.uint8)
     return np.where(mask[:, :, np.newaxis] == 255, frame, blended).astype(np.uint8)
 
 
 def apply_chromatic_aberration(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos: float, frame_idx: int) -> np.ndarray:
-    """Chromatic aberration: sub-pixel stepped (1–3px), band-limited. Rare-tier: shift only edges."""
+    """Chromatic aberration with radial falloff and sub-pixel precision. Simulates real lens fringing."""
     h, w = frame.shape[:2]
     np.random.seed(frame_idx * 12347)
     base_step = 1 + (intensity % 3)
-    offset = int(base_step * (1 + intensity * 0.3) * (0.7 + chaos * 0.6))
-    offset = max(1, min(offset, 10))
+    max_offset = base_step * (1 + intensity * 0.3) * (0.7 + chaos * 0.6)
+    max_offset = max(0.5, min(max_offset, 10.0))
 
     b, g, r = cv2.split(frame)
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -239,10 +291,22 @@ def apply_chromatic_aberration(frame: np.ndarray, mask: np.ndarray, intensity: i
     else:
         edge_3ch = np.ones((h, w, 3), dtype=np.float32)
 
-    M_pos = np.float32([[1, 0, offset], [0, 1, 0]])
-    M_neg = np.float32([[1, 0, -offset], [0, 1, 0]])
-    r_shifted = cv2.warpAffine(r, M_pos, (w, h), borderMode=cv2.BORDER_REPLICATE)
-    b_shifted = cv2.warpAffine(b, M_neg, (w, h), borderMode=cv2.BORDER_REPLICATE)
+    cx, cy = w / 2.0, h / 2.0
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    radial = np.sqrt(((xx - cx) / cx) ** 2 + ((yy - cy) / cy) ** 2)
+    radial = np.clip(radial, 0, 1.4)
+
+    dx = (xx - cx) / cx * radial * max_offset
+    dy = (yy - cy) / cy * radial * max_offset * 0.3
+
+    map_x_base = xx.astype(np.float32)
+    map_y_base = yy.astype(np.float32)
+    r_shifted = cv2.remap(r, (map_x_base + dx).astype(np.float32),
+                          (map_y_base + dy).astype(np.float32),
+                          cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+    b_shifted = cv2.remap(b, (map_x_base - dx).astype(np.float32),
+                          (map_y_base - dy).astype(np.float32),
+                          cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
     glitched = cv2.merge([b_shifted, g, r_shifted])
     blended = (edge_3ch * glitched.astype(np.float32) + (1 - edge_3ch) * frame.astype(np.float32)).astype(np.uint8)
     return np.where(mask[:, :, np.newaxis] == 255, frame, blended).astype(np.uint8)
@@ -274,31 +338,46 @@ def _get_coherent_texture(h: int, w: int, token_seed: int, preset_seed: int, fra
 
 
 def apply_scanlines(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos: float, frame_idx: int) -> np.ndarray:
-    """CRT-style scanlines. Occasional line dropout (missing scanlines)."""
+    """CRT phosphor-style scanlines: alternating thick/thin bands with RGB sub-pixel tint."""
     h, w = frame.shape[:2]
     np.random.seed(frame_idx * 1111)
-    line_interval = max(1, 4 - intensity // 3)
-    scanline = np.ones((h, w), dtype=np.uint8) * 255
-    dark_val = int(255 * (1 - intensity * 0.08))
-    for i in range(0, h, line_interval):
-        line_y = i
-        if line_y >= h:
-            break
-        if chaos > 0.2 and np.random.rand() < chaos * 0.12:
-            continue
-        scanline[line_y, :] = dark_val
-    scanlines_3ch = cv2.merge([scanline, scanline, scanline])
-    glitched = cv2.multiply(frame, scanlines_3ch // 255)
+    line_interval = max(3, 6 - intensity // 2)
+    dark_strength = 0.06 + intensity * 0.04
+
+    y = np.arange(h, dtype=np.float32)
+    thick = (np.sin(y * np.pi / line_interval) ** 2)
+    thin = (np.sin(y * np.pi / max(2, line_interval // 2) + 0.5) ** 2) * 0.5
+    scanline_pattern = 1.0 - dark_strength * (1.0 - (thick * 0.7 + thin * 0.3))
+
+    if chaos > 0.2:
+        dropout = np.random.rand(h) < chaos * 0.12
+        scanline_pattern[dropout] = 1.0
+
+    scanline_2d = np.tile(scanline_pattern[:, np.newaxis], (1, w))
+    r_tint = 1.0 + 0.02 * intensity * np.sin(y * np.pi / line_interval + 0.0)[:, np.newaxis] * np.ones((1, w))
+    g_tint = 1.0 + 0.01 * intensity * np.sin(y * np.pi / line_interval + 2.1)[:, np.newaxis] * np.ones((1, w))
+    b_tint = 1.0 + 0.02 * intensity * np.sin(y * np.pi / line_interval + 4.2)[:, np.newaxis] * np.ones((1, w))
+    f = frame.astype(np.float32)
+    glitched = np.stack([
+        f[:, :, 0] * scanline_2d * b_tint,
+        f[:, :, 1] * scanline_2d * g_tint,
+        f[:, :, 2] * scanline_2d * r_tint,
+    ], axis=-1)
+    glitched = np.clip(glitched, 0, 255).astype(np.uint8)
     return np.where(mask[:, :, np.newaxis] == 255, frame, glitched).astype(np.uint8)
 
 
 def apply_digital_noise(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos: float, frame_idx: int) -> np.ndarray:
-    """Digital noise - shared texture layer, temporal coherence (slides 1px/frame)."""
+    """Digital noise using smooth Perlin-like noise for organic texture."""
     h, w = frame.shape[:2]
-    tex = _get_texture_layer(h, w, frame_idx, intensity, chaos, "noise")
     noise_amount = intensity * 25 + int(chaos * 50)
-    noise = ((tex - 128) / 128 * (noise_amount / 2)).astype(np.int32)
-    glitched = np.clip(frame.astype(np.int32) + noise, 0, 255).astype(np.uint8)
+    seed = 42 + frame_idx * 3
+    perlin = _perlin_noise_2d(h, w, scale=max(4, 16 - intensity), octaves=3, seed=seed)
+    sharp = np.random.RandomState(frame_idx * 7919).rand(h, w).astype(np.float32)
+    blended_noise = 0.7 * perlin + 0.3 * sharp
+    noise_vals = ((blended_noise - 0.5) * noise_amount).astype(np.int32)
+    noise_3ch = np.stack([noise_vals, noise_vals, noise_vals], axis=-1)
+    glitched = np.clip(frame.astype(np.int32) + noise_3ch, 0, 255).astype(np.uint8)
     return np.where(mask[:, :, np.newaxis] == 255, frame, glitched).astype(np.uint8)
 
 
@@ -325,15 +404,16 @@ def apply_pixelation(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos:
 
 def apply_datamosh(frame: np.ndarray, prev_frame: Optional[np.ndarray], mask: np.ndarray,
                    intensity: int, chaos: float, frame_idx: int) -> np.ndarray:
-    """Optical-flow datamosh: rare+ only, mask-protected. Band-limited + short-lived (1–2 frames)."""
+    """Optical-flow datamosh with smoothed flow and wider temporal window."""
     h, w = frame.shape[:2]
     if prev_frame is None:
         return frame
 
-    # Short-lived: only active near event peak (frames 5–7 of 12-cycle)
     pos = frame_idx % EVENT_CYCLE
-    if pos < 4 or pos > 8:
+    if pos < 2 or pos > 10:
         return frame
+    ramp = 1.0 - abs(pos - EVENT_PEAK_FRAME) / (EVENT_PEAK_FRAME + 1)
+    ramp = max(0.15, ramp)
 
     prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
     curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -343,69 +423,86 @@ def apply_datamosh(frame: np.ndarray, prev_frame: Optional[np.ndarray], mask: np
         poly_n=5, poly_sigma=1.1, flags=0,
     )
 
-    # Band-limited scale so silhouette stays readable
-    scale = 0.3 + intensity * 0.08 + chaos * 0.15
-    scale = min(scale, 1.2)
-    np.random.seed(frame_idx * 7919)
-    noise = np.random.randn(h, w, 2).astype(np.float32) * (intensity * 0.3)
+    blur_k = max(5, 15 - intensity) | 1
+    flow[:, :, 0] = cv2.GaussianBlur(flow[:, :, 0], (blur_k, blur_k), 0)
+    flow[:, :, 1] = cv2.GaussianBlur(flow[:, :, 1], (blur_k, blur_k), 0)
+
+    scale = (0.3 + intensity * 0.1 + chaos * 0.2) * ramp
+    scale = min(scale, 1.5)
 
     y_coords = np.arange(h, dtype=np.float32)[:, np.newaxis]
     x_coords = np.arange(w, dtype=np.float32)[np.newaxis, :]
-    map_x = (x_coords - flow[:, :, 0] * scale + noise[:, :, 0]).astype(np.float32)
-    map_y = (y_coords - flow[:, :, 1] * scale + noise[:, :, 1]).astype(np.float32)
+    map_x = (x_coords - flow[:, :, 0] * scale).astype(np.float32)
+    map_y = (y_coords - flow[:, :, 1] * scale).astype(np.float32)
 
     glitched = cv2.remap(prev_frame, map_x, map_y, cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
     return np.where(mask[:, :, np.newaxis] == 255, frame, glitched).astype(np.uint8)
 
 
 def apply_melting(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos: float, frame_idx: int) -> np.ndarray:
-    """Liquid corruption: low-res displacement map so it looks like liquid, not blur. Rare+ only."""
+    """Liquid corruption using Perlin noise displacement for organic, flowing warps."""
     h, w = frame.shape[:2]
-    np.random.seed(frame_idx * 54321)
-    # Low-res displacement map (e.g. 16x16) then upsample for coherent "liquid" look
-    # Very gentle: intensity 1 = ~0.3px, intensity 5 = ~1.2px, intensity 10 = ~2.5px
-    d_res = 16
-    disp_h, disp_w = max(4, h // d_res), max(4, w // d_res)
-    displacement = intensity * 0.2 + chaos * 0.5
-    phase = frame_idx * 0.1
-    yy = np.linspace(0, h, disp_h)
-    xx = np.linspace(0, w, disp_w)
-    low_wave_x = np.sin(np.outer(yy, np.ones(disp_w)) * 0.02 + phase) * displacement
-    low_wave_y = np.cos(np.outer(np.ones(disp_h), xx) * 0.02 + phase) * displacement * 0.5
-    noise_scale = 0.15 + 0.08 * intensity
-    low_noise = np.random.randn(disp_h, disp_w, 2).astype(np.float32) * noise_scale
-    low_map_x = np.tile(np.arange(disp_w, dtype=np.float32), (disp_h, 1)) * (w / disp_w) + low_wave_x + low_noise[:, :, 0] * (w / disp_w)
-    low_map_y = np.tile(np.arange(disp_h, dtype=np.float32)[:, np.newaxis], (1, disp_w)) * (h / disp_h) + low_wave_y + low_noise[:, :, 1] * (h / disp_h)
-    map_x = cv2.resize(low_map_x, (w, h), interpolation=cv2.INTER_LINEAR)
-    map_y = cv2.resize(low_map_y, (w, h), interpolation=cv2.INTER_LINEAR)
-    y_coords = np.arange(h, dtype=np.float32)[:, np.newaxis]
+    phase = frame_idx * 0.15
+    displacement = 1.0 + intensity * 0.8 + chaos * 2.0
+
+    noise_x = _perlin_noise_2d(h, w, scale=max(4, 12 - intensity), octaves=4,
+                                seed=int(frame_idx * 54321) % (2**31))
+    noise_y = _perlin_noise_2d(h, w, scale=max(4, 14 - intensity), octaves=4,
+                                seed=int(frame_idx * 54321 + 99999) % (2**31))
+
+    wave_x = np.sin(np.arange(h, dtype=np.float32)[:, np.newaxis] * 0.03 + phase) * displacement * 0.3
+    wave_y = np.cos(np.arange(w, dtype=np.float32)[np.newaxis, :] * 0.025 + phase * 1.2) * displacement * 0.2
+
     x_coords = np.arange(w, dtype=np.float32)[np.newaxis, :]
+    y_coords = np.arange(h, dtype=np.float32)[:, np.newaxis]
+
+    map_x = x_coords + (noise_x - 0.5) * displacement * 6.0 + wave_x
+    map_y = y_coords + (noise_y - 0.5) * displacement * 4.0 + wave_y
+
     map_x = np.where(mask < 128, map_x, x_coords).astype(np.float32)
     map_y = np.where(mask < 128, map_y, y_coords).astype(np.float32)
     map_x = np.ascontiguousarray(map_x)
     map_y = np.ascontiguousarray(map_y)
-    glitched = cv2.remap(frame, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    glitched = cv2.remap(frame, map_x, map_y, cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
     return np.where(mask[:, :, np.newaxis] == 255, frame, glitched).astype(np.uint8)
 
 
 def apply_vhs_tracking(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos: float, frame_idx: int) -> np.ndarray:
-    """VHS tracking errors - horizontal banding. Amplitude 'breathes' (ramps up/down) vs constant jitter."""
+    """VHS tracking errors with soft-edged horizontal bands and vertical wobble."""
     h, w = frame.shape[:2]
     np.random.seed(frame_idx * 8888)
-    glitched = frame.copy()
+    glitched = frame.copy().astype(np.float32)
+    orig = frame.astype(np.float32)
 
-    # Breathe: amplitude ramps up/down over ~8 frames
     breathe = 0.5 + 0.5 * np.sin(frame_idx * 0.4)
     amp = (0.5 + breathe) * intensity * 2
 
-    band_height = max(2, 20 - intensity * 2)
-    for y in range(0, h, band_height):
-        if mask[y:y+band_height, :].mean() < 200:
-            offset = int(np.clip(np.random.randn() * amp, -intensity * 3, intensity * 3))
-            if offset != 0:
-                glitched[y:y+band_height, :] = np.roll(frame[y:y+band_height, :], offset, axis=1)
+    band_height = max(3, 20 - intensity * 2)
+    feather = max(1, band_height // 3)
 
-    return np.where(mask[:, :, np.newaxis] == 255, frame, glitched).astype(np.uint8)
+    for y in range(0, h, band_height):
+        y_end = min(y + band_height, h)
+        if mask[y:y_end, :].mean() < 200:
+            offset_f = np.clip(np.random.randn() * amp, -intensity * 3.5, intensity * 3.5)
+            if abs(offset_f) > 0.3:
+                band = frame[y:y_end, :]
+                shifted = _subpixel_shift(band, offset_f, 0, w, y_end - y)
+                bh = y_end - y
+                fade = np.ones(bh, dtype=np.float32)
+                ramp_len = min(feather, bh // 2)
+                if ramp_len > 0:
+                    fade[:ramp_len] = np.linspace(0.0, 1.0, ramp_len)
+                    fade[-ramp_len:] = np.linspace(1.0, 0.0, ramp_len)
+                fade_2d = fade[:, np.newaxis, np.newaxis]
+                glitched[y:y_end, :] = fade_2d * shifted.astype(np.float32) + (1 - fade_2d) * orig[y:y_end, :]
+
+    result = np.clip(glitched, 0, 255).astype(np.uint8)
+    if intensity >= 3:
+        bleed_k = max(3, intensity) | 1
+        b, g, r = cv2.split(result)
+        r_bleed = cv2.GaussianBlur(r, (bleed_k * 2 + 1, 1), bleed_k * 0.5)
+        result = cv2.merge([b, g, np.clip(r * 0.7 + r_bleed * 0.3, 0, 255).astype(np.uint8)])
+    return np.where(mask[:, :, np.newaxis] == 255, frame, result).astype(np.uint8)
 
 
 def apply_crt_flicker(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos: float, frame_idx: int) -> np.ndarray:
@@ -422,19 +519,39 @@ def apply_crt_flicker(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos
 
 
 def apply_bitcrush(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos: float, frame_idx: int) -> np.ndarray:
-    """Bit depth reduction. Subtle on commons. Rare: bitcrush only background (mask already does this)."""
-    # Gentler scaling for common: levels drop less aggressively at low intensity
-    levels = max(2, 256 - intensity * 18)
+    """Bit depth reduction with ordered dithering for smoother color banding."""
     if intensity <= 0:
         return frame
-    glitched = (frame // (256 // levels)) * (256 // levels)
+    levels = max(2, 256 - intensity * 18)
+    step = max(1, 256 // levels)
+    bayer8 = np.array([
+        [ 0, 32,  8, 40,  2, 34, 10, 42],
+        [48, 16, 56, 24, 50, 18, 58, 26],
+        [12, 44,  4, 36, 14, 46,  6, 38],
+        [60, 28, 52, 20, 62, 30, 54, 22],
+        [ 3, 35, 11, 43,  1, 33,  9, 41],
+        [51, 19, 59, 27, 49, 17, 57, 25],
+        [15, 47,  7, 39, 13, 45,  5, 37],
+        [63, 31, 55, 23, 61, 29, 53, 21],
+    ], dtype=np.float32) / 64.0
+    h, w = frame.shape[:2]
+    dither = np.tile(bayer8, (h // 8 + 2, w // 8 + 2))[:h, :w]
+    dither_3ch = np.stack([dither, dither, dither], axis=-1)
+    dithered = frame.astype(np.float32) + dither_3ch * step - step * 0.5
+    glitched = np.clip((dithered // step) * step, 0, 255).astype(np.uint8)
     return np.where(mask[:, :, np.newaxis] == 255, frame, glitched).astype(np.uint8)
 
 
 def apply_tv_static(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos: float, frame_idx: int) -> np.ndarray:
-    """TV static - shared texture layer, temporal coherence (slides 1px/frame). Intensity modulates blend."""
+    """TV static with scanline-correlated noise: noise varies per scanline for authentic CRT look."""
     h, w = frame.shape[:2]
-    static = _get_texture_layer(h, w, frame_idx, intensity, chaos, "static").astype(np.uint8)
+    rng = np.random.RandomState(42 + frame_idx)
+    row_noise = rng.rand(h, 1).astype(np.float32)
+    pixel_noise = rng.rand(h, w).astype(np.float32)
+    static_val = (row_noise * 0.6 + pixel_noise * 0.4) * 255
+    dy = frame_idx % (h + 4)
+    static_val = np.roll(static_val, dy, axis=0)
+    static = np.stack([static_val, static_val, static_val], axis=-1).astype(np.uint8)
     amount = min(0.6, intensity * 0.06)
     glitched = cv2.addWeighted(frame, 1 - amount, static, amount, 0)
     if intensity >= 3:
@@ -447,29 +564,34 @@ def apply_tv_static(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos: 
 
 
 def apply_film_grain(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos: float, frame_idx: int) -> np.ndarray:
-    """Subtle film grain - shared texture layer, temporal coherence. Intensity modulates amplitude."""
+    """Film grain with luminance-dependent intensity -- more grain in shadows, less in highlights."""
     if intensity <= 0:
         return frame
     h, w = frame.shape[:2]
-    tex = _get_texture_layer(h, w, frame_idx, intensity, chaos, "grain")
-    amp = intensity * 1.2
-    noise = ((tex - 128) / 128 * amp).astype(np.int16)
-    glitched = np.clip(frame.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+    amp = intensity * 1.5
+    rng = np.random.RandomState(42 + frame_idx)
+    grain = rng.randn(h, w).astype(np.float32)
+    grain_smooth = cv2.GaussianBlur(grain, (3, 3), 0.8)
+    grain_final = 0.6 * grain + 0.4 * grain_smooth
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+    lum_weight = 1.0 - gray * 0.6
+    grain_scaled = (grain_final * amp * lum_weight).astype(np.int16)
+    grain_3ch = np.stack([grain_scaled, grain_scaled, grain_scaled], axis=-1)
+    glitched = np.clip(frame.astype(np.int16) + grain_3ch, 0, 255).astype(np.uint8)
     return np.where(mask[:, :, np.newaxis] == 255, frame, glitched).astype(np.uint8)
 
 
 def apply_pixel_sort(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos: float, frame_idx: int) -> np.ndarray:
-    """Pixel sort in small regions or along edges. Rare: sort follows rolling scanline."""
+    """Pixel sort with feathered segment boundaries to avoid harsh edges."""
     if intensity <= 0:
         return frame
     h, w = frame.shape[:2]
     np.random.seed(frame_idx * 54321)
     glitched = frame.copy()
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    edges = cv2.Canny(gray, 60, 120)
-    # Small regions: process fewer rows, smaller segments
     row_skip = max(2, 5 - intensity // 2)
-    scan_y = (frame_idx * 3) % h  # Rolling scanline for rare-tier
+    scan_y = (frame_idx * 3) % h
     n_rows = (h + row_skip - 1) // row_skip
     for ri in range(n_rows):
         y = ri * row_skip
@@ -477,7 +599,6 @@ def apply_pixel_sort(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos:
             break
         if mask[y:min(y+row_skip, h), :].mean() >= 220:
             continue
-        # Rare: only sort near the rolling scanline
         if intensity >= 5 and abs(y - scan_y) > row_skip * 3:
             continue
         for dy in range(row_skip):
@@ -497,7 +618,16 @@ def apply_pixel_sort(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos:
                 order = np.argsort(seg_gray)
                 if np.random.rand() > 0.5:
                     order = order[::-1]
-                row_bgr[lo:hi] = seg[order]
+                sorted_seg = seg[order]
+                feather = min(2, (hi - lo) // 4)
+                if feather > 0:
+                    fade_in = np.linspace(0, 1, feather)[:, np.newaxis]
+                    sorted_seg[:feather] = (fade_in * sorted_seg[:feather].astype(np.float32) +
+                                             (1 - fade_in) * seg[:feather].astype(np.float32)).astype(np.uint8)
+                    fade_out = np.linspace(1, 0, feather)[:, np.newaxis]
+                    sorted_seg[-feather:] = (fade_out * sorted_seg[-feather:].astype(np.float32) +
+                                              (1 - fade_out) * seg[-feather:].astype(np.float32)).astype(np.uint8)
+                row_bgr[lo:hi] = sorted_seg
             glitched[row_y, :, :] = row_bgr
     return np.where(mask[:, :, np.newaxis] == 255, frame, glitched).astype(np.uint8)
 
@@ -635,25 +765,29 @@ def apply_neon_bars(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos: 
 
 
 def apply_edge_dissolve(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos: float, frame_idx: int) -> np.ndarray:
-    """Dissolve background inward (not skull outward). Only corrupt background bands - keeps PFP readable."""
+    """Noise-based dissolution: pixels dissolve into static based on Perlin noise threshold."""
     if intensity <= 0:
         return frame
     h, w = frame.shape[:2]
-    np.random.seed(frame_idx * 9999)
-    glitched = frame.copy()
-    slice_h = max(2, 12 - intensity)
-    # Only offset slices that are mostly background (mask < 128) - dissolve inward, not subject
-    for y in range(0, h - slice_h, slice_h):
-        if mask[y:y+slice_h, :].mean() > 80:
-            continue
-        offset = np.random.randint(-intensity * 6, intensity * 6 + 1)
-        if offset != 0:
-            glitched[y:y+slice_h, :] = np.roll(frame[y:y+slice_h, :].copy(), offset, axis=1)
-    return glitched
+    dissolve_noise = _perlin_noise_2d(h, w, scale=max(4, 10 - intensity), octaves=3,
+                                       seed=42 + frame_idx * 3)
+    threshold = 0.3 + intensity * 0.06 + np.sin(frame_idx * 0.3) * 0.05
+    dissolve_mask = (dissolve_noise > threshold).astype(np.float32)
+    dissolve_mask *= (mask < 128).astype(np.float32)
+
+    feather_k = max(3, intensity) | 1
+    dissolve_mask = cv2.GaussianBlur(dissolve_mask, (feather_k, feather_k), feather_k * 0.3)
+
+    rng = np.random.RandomState(42 + frame_idx)
+    static = rng.randint(0, 60, (h, w, 3), dtype=np.uint8).astype(np.float32)
+
+    dissolve_3ch = dissolve_mask[:, :, np.newaxis]
+    glitched = (1 - dissolve_3ch) * frame.astype(np.float32) + dissolve_3ch * static
+    return np.clip(glitched, 0, 255).astype(np.uint8)
 
 
 def apply_frame_drift(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos: float, frame_idx: int) -> np.ndarray:
-    """Frame drift - whole image wobbles. Clamp to 1–2px for common/uncommon (intensity 1–4)."""
+    """Frame drift - background wobbles while subject stays in place via mask compositing."""
     h, w = frame.shape[:2]
     raw_x = np.sin(frame_idx * 0.4) * intensity * 4 + np.cos(frame_idx * 0.3) * intensity * 2
     raw_y = np.sin(frame_idx * 0.5 + 1) * intensity * 2 + np.cos(frame_idx * 0.2) * intensity * 3
@@ -662,25 +796,30 @@ def apply_frame_drift(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos
     drift_y = int(np.clip(raw_y, -clamp, clamp))
     if drift_x != 0 or drift_y != 0:
         M = np.float32([[1, 0, drift_x], [0, 1, drift_y]])
-        return cv2.warpAffine(frame, M, (w, h), borderMode=cv2.BORDER_REPLICATE)
+        warped = cv2.warpAffine(frame, M, (w, h), borderMode=cv2.BORDER_REPLICATE)
+        return np.where(mask[:, :, np.newaxis] == 255, frame, warped).astype(np.uint8)
     return frame
 
 
 def apply_rolling_scanlines(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos: float, frame_idx: int) -> np.ndarray:
-    """Scanlines that roll down each frame. Occasional line dropout (missing scanlines)."""
+    """Soft rolling scanlines that scroll down each frame."""
     h, w = frame.shape[:2]
     np.random.seed(frame_idx * 5432)
-    line_interval = max(1, 5 - intensity // 2)
-    phase = (frame_idx * 3) % line_interval
-    scanline = np.ones((h, w), dtype=np.uint8) * 255
-    dark_val = int(255 * (1 - intensity * 0.1))
-    for i in range(0, h, line_interval):
-        line_y = (i + phase) % h
-        if chaos > 0.2 and np.random.rand() < chaos * 0.1:
-            continue
-        scanline[line_y, :] = dark_val
-    scanlines_3ch = cv2.merge([scanline, scanline, scanline])
-    glitched = cv2.multiply(frame, scanlines_3ch // 255)
+    line_interval = max(2, 6 - intensity // 2)
+    phase = frame_idx * 3.0
+    dark_strength = 0.08 + intensity * 0.04
+
+    y = np.arange(h, dtype=np.float32)
+    pattern = np.sin((y + phase) * np.pi / line_interval) ** 2
+    scanline_val = 1.0 - dark_strength * (1.0 - pattern)
+
+    if chaos > 0.2:
+        dropout = np.random.rand(h) < chaos * 0.1
+        scanline_val[dropout] = 1.0
+
+    scanline_2d = np.tile(scanline_val[:, np.newaxis], (1, w))
+    scanline_3ch = np.stack([scanline_2d, scanline_2d, scanline_2d], axis=-1)
+    glitched = (frame.astype(np.float32) * scanline_3ch).astype(np.uint8)
     return np.where(mask[:, :, np.newaxis] == 255, frame, glitched).astype(np.uint8)
 
 
@@ -826,25 +965,45 @@ def apply_subject_invert(frame: np.ndarray, mask: np.ndarray, intensity: int, fr
 
 
 def apply_subject_particles(frame: np.ndarray, mask: np.ndarray, intensity: int, frame_idx: int) -> np.ndarray:
-    """Grainy particle overlay on subject - white and dark specks that animate per frame."""
+    """Particle overlay on subject with size variation, motion, and alpha fade."""
     if intensity <= 0:
         return frame
     h, w = frame.shape[:2]
-    np.random.seed(frame_idx * 7777 + 3333)
-    n_particles = int(h * w * 0.0015 * intensity * (0.5 + np.random.rand()))
-    n_particles = max(200, min(8000, n_particles))
-    ys = np.random.randint(0, h, n_particles)
-    xs = np.random.randint(0, w, n_particles)
-    vals = np.random.choice([0, 255], n_particles, p=[0.5, 0.5]).astype(np.float32)
-    overlay = np.zeros((h, w, 3), dtype=np.float32)
-    overlay[ys, xs, :] = vals[:, np.newaxis]
+    rng = np.random.RandomState(3333 + (frame_idx // 3) * 7777)
+    n_particles = int(h * w * 0.001 * intensity * (0.5 + rng.rand()))
+    n_particles = max(100, min(5000, n_particles))
+
+    base_ys = rng.randint(0, h, n_particles).astype(np.float32)
+    base_xs = rng.randint(0, w, n_particles).astype(np.float32)
+    velocities_x = rng.randn(n_particles).astype(np.float32) * 0.5
+    velocities_y = rng.randn(n_particles).astype(np.float32) * 0.3 - 0.2
+    sub_frame = frame_idx % 3
+    ys = np.clip((base_ys + velocities_y * sub_frame).astype(int), 0, h - 1)
+    xs = np.clip((base_xs + velocities_x * sub_frame).astype(int), 0, w - 1)
+
+    sizes = rng.choice([1, 1, 1, 2, 2, 3], n_particles)
+    vals = rng.choice([0, 200, 255], n_particles, p=[0.3, 0.3, 0.4]).astype(np.float32)
+    alphas = rng.uniform(0.3, 1.0, n_particles).astype(np.float32)
+
     subject = mask > 0.3
-    hit = np.zeros((h, w), dtype=bool)
-    hit[ys, xs] = True
-    apply_mask = hit & subject
-    r = min(1.0, intensity * 0.12)
     result = frame.astype(np.float32).copy()
-    result[apply_mask] = (1 - r) * result[apply_mask] + r * overlay[apply_mask]
+    blend_strength = min(1.0, intensity * 0.12)
+
+    for i in range(n_particles):
+        py, px, sz, val, alpha = ys[i], xs[i], sizes[i], vals[i], alphas[i]
+        y0, y1 = max(0, py), min(h, py + sz)
+        x0, x1 = max(0, px), min(w, px + sz)
+        if y0 >= y1 or x0 >= x1:
+            continue
+        region_mask = subject[y0:y1, x0:x1]
+        if not region_mask.any():
+            continue
+        a = blend_strength * alpha
+        region = result[y0:y1, x0:x1]
+        color = np.array([val, val, val], dtype=np.float32)
+        blended = (1 - a) * region + a * color
+        result[y0:y1, x0:x1] = np.where(region_mask[:, :, np.newaxis], blended, region)
+
     return np.clip(result, 0, 255).astype(np.uint8)
 
 
@@ -914,8 +1073,10 @@ def apply_slit_scan(
         return frame
     h, w = frame.shape[:2]
     pos = frame_idx % EVENT_CYCLE
-    if pos not in (EVENT_PEAK_FRAME - 1, EVENT_PEAK_FRAME, EVENT_PEAK_FRAME + 1):
+    if pos < 3 or pos > 9:
         return frame
+    ramp = 1.0 - abs(pos - EVENT_PEAK_FRAME) / (EVENT_PEAK_FRAME + 1)
+    ramp = max(0.2, ramp)
     np.random.seed(frame_idx * 3313)
     slice_w = max(2, 8 - intensity)
     glitched = frame.copy().astype(np.float32)
@@ -926,8 +1087,8 @@ def apply_slit_scan(
             break
         if mask[:, x:x + slice_w].mean() > 220:
             continue
-        t = np.random.rand()
-        blend = t * frame[:, x:x + slice_w].astype(np.float32) + (1 - t) * prev_frame[:, x:x + slice_w].astype(np.float32)
+        t = np.random.rand() * ramp
+        blend = (1 - t) * frame[:, x:x + slice_w].astype(np.float32) + t * prev_frame[:, x:x + slice_w].astype(np.float32)
         glitched[:, x:x + slice_w] = blend
     return np.where(mask[:, :, np.newaxis] == 255, frame, np.clip(glitched, 0, 255).astype(np.uint8)).astype(np.uint8)
 
@@ -938,27 +1099,28 @@ def apply_parallax_split(frame: np.ndarray, mask: np.ndarray, intensity: int, ch
         return frame
     h, w = frame.shape[:2]
     pos = frame_idx % EVENT_CYCLE
-    if pos not in (EVENT_PEAK_FRAME - 1, EVENT_PEAK_FRAME):
+    if pos < 3 or pos > 8:
         return frame
+    ramp = 1.0 - abs(pos - EVENT_PEAK_FRAME) / (EVENT_PEAK_FRAME + 1)
+    ramp = max(0.2, ramp)
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray, 50, 120)
     edge_dilate = cv2.dilate(edges, np.ones((3, 3), np.uint8))
-    bg_mask = (mask < 64).astype(np.uint8) * 255
     edge_mask = (edge_dilate > 0) & (mask < 200)
     face_mask = (mask > 200).astype(np.uint8) * 255
-    offset_x = int(4 * intensity * (0.5 + 0.5 * np.sin(frame_idx)))
-    offset_y = int(-2 * intensity)
+    offset_x = 4 * intensity * (0.5 + 0.5 * np.sin(frame_idx)) * ramp
+    offset_y = -2 * intensity * ramp
     M_bg = np.float32([[1, 0, offset_x], [0, 1, offset_y]])
-    M_edge = np.float32([[1, 0, -offset_x // 2], [0, 1, offset_y // 2]])
-    bg_shifted = cv2.warpAffine(frame, M_bg, (w, h), borderMode=cv2.BORDER_REPLICATE)
-    edge_shifted = cv2.warpAffine(frame, M_edge, (w, h), borderMode=cv2.BORDER_REPLICATE)
+    M_edge = np.float32([[1, 0, -offset_x * 0.5], [0, 1, offset_y * 0.5]])
+    bg_shifted = cv2.warpAffine(frame, M_bg, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+    edge_shifted = cv2.warpAffine(frame, M_edge, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
     glitched = np.where(face_mask[:, :, np.newaxis] == 255, frame, bg_shifted)
     glitched = np.where(edge_mask[:, :, np.newaxis], edge_shifted, glitched)
     return np.clip(glitched, 0, 255).astype(np.uint8)
 
 
 def apply_voronoi_shatter(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos: float, frame_idx: int) -> np.ndarray:
-    """Tessellated Voronoi shatter - crystalline fracture. Rare: small region. Legendary: full-frame face-safe."""
+    """Vectorized Voronoi shatter with feathered cell edges for smoother transitions."""
     if intensity <= 0:
         return frame
     h, w = frame.shape[:2]
@@ -968,13 +1130,17 @@ def apply_voronoi_shatter(frame: np.ndarray, mask: np.ndarray, intensity: int, c
     pts[:, 0] = np.clip(pts[:, 0], 0, h - 1)
     pts[:, 1] = np.clip(pts[:, 1], 0, w - 1)
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
-    dist_map = np.full((h, w), 1e9, dtype=np.float32)
-    id_map = np.zeros((h, w), dtype=np.int32)
+    all_dists = np.empty((n_points, h, w), dtype=np.float32)
     for i, (py, px) in enumerate(pts):
-        d = (yy - py) ** 2 + (xx - px) ** 2
-        closer = d < dist_map
-        dist_map[closer] = d[closer]
-        id_map[closer] = i
+        all_dists[i] = (yy - py) ** 2 + (xx - px) ** 2
+    id_map = np.argmin(all_dists, axis=0)
+    min_dists = np.min(all_dists, axis=0)
+    all_dists[id_map.ravel(), np.arange(h * w) // w, np.arange(h * w) % w] = 1e9
+    second_dists = np.min(all_dists.reshape(n_points, -1), axis=0).reshape(h, w)
+    edge_dist = np.sqrt(second_dists) - np.sqrt(min_dists)
+    feather_width = 2.0
+    edge_blend = np.clip(edge_dist / feather_width, 0, 1)
+
     offset_scale = intensity * (0.8 + chaos * 0.6)
     glitched = frame.copy().astype(np.float32)
     for i in range(n_points):
@@ -985,7 +1151,8 @@ def apply_voronoi_shatter(frame: np.ndarray, mask: np.ndarray, intensity: int, c
         oy = int(np.clip(np.random.randn() * offset_scale * 0.5, -4, 4))
         if ox != 0 or oy != 0:
             shifted = np.roll(np.roll(frame, ox, axis=1), oy, axis=0)
-            glitched[cell] = shifted[cell]
+            blend = edge_blend[cell, np.newaxis]
+            glitched[cell] = blend * shifted[cell].astype(np.float32) + (1 - blend) * frame[cell].astype(np.float32)
     return np.where(mask[:, :, np.newaxis] == 255, frame, np.clip(glitched, 0, 255).astype(np.uint8)).astype(np.uint8)
 
 
@@ -1010,13 +1177,14 @@ def apply_echo_crown(
 
 
 def apply_strobe_phase(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos: float, frame_idx: int) -> np.ndarray:
-    """Strobe: lock luminance to few levels (posterize) for 1 boundary frame - reality sampling."""
+    """Strobe posterize with multi-frame activation and intensity ramp."""
     if intensity <= 0:
         return frame
     pos = frame_idx % EVENT_CYCLE
-    if pos != EVENT_PEAK_FRAME:
+    if pos < EVENT_PEAK_FRAME - 1 or pos > EVENT_PEAK_FRAME + 1:
         return frame
-    levels = max(4, 12 - intensity)
+    ramp = 1.0 - abs(pos - EVENT_PEAK_FRAME) * 0.4
+    levels = max(4, 12 - int(intensity * ramp))
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     posterized = (gray // (256 // levels)) * (256 // levels)
     posterized = np.clip(posterized, 0, 255).astype(np.uint8)
@@ -1060,28 +1228,33 @@ def apply_palette_cycle(frame: np.ndarray, mask: np.ndarray, intensity: int, cha
 
 
 def apply_chroma_collapse(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos: float, frame_idx: int) -> np.ndarray:
-    """Selective color channel collapse: near-monochrome then oversaturate rebound - soul drain."""
+    """Selective single-channel collapse: kills one RGB channel at a time, then rebounds with color bleed."""
     if intensity <= 0:
         return frame
-    pos = (frame_idx // 2) % 4
-    yuv = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV)
-    y_ch, u_ch, v_ch = cv2.split(yuv)
-    if pos in (0, 1):
-        drop = 1.0 - min(0.85, intensity * 0.1)
-        u_new = np.clip(128 + (u_ch.astype(np.float32) - 128) * drop, 0, 255).astype(np.uint8)
-        v_new = np.clip(128 + (v_ch.astype(np.float32) - 128) * drop, 0, 255).astype(np.uint8)
-        yuv = cv2.merge([y_ch, u_new, v_new])
+    phase = (frame_idx // 3) % 6
+    glitched = frame.copy().astype(np.float32)
+    b, g, r = glitched[:, :, 0], glitched[:, :, 1], glitched[:, :, 2]
+    drop = max(0.05, 1.0 - intensity * 0.12)
+    bleed = 1.0 + min(1.5, intensity * 0.18)
+
+    if phase in (0, 1):
+        glitched[:, :, 2] = r * drop
+        if phase == 1:
+            glitched[:, :, 0] = np.clip(b * bleed, 0, 255)
+    elif phase in (2, 3):
+        glitched[:, :, 1] = g * drop
+        if phase == 3:
+            glitched[:, :, 2] = np.clip(r * bleed, 0, 255)
     else:
-        boost = 1.0 + min(1.8, intensity * 0.2)
-        u_new = np.clip(128 + (u_ch.astype(np.float32) - 128) * boost, 0, 255).astype(np.uint8)
-        v_new = np.clip(128 + (v_ch.astype(np.float32) - 128) * boost, 0, 255).astype(np.uint8)
-        yuv = cv2.merge([y_ch, u_new, v_new])
-    glitched = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
-    return np.where(mask[:, :, np.newaxis] == 255, frame, glitched).astype(np.uint8)
+        glitched[:, :, 0] = b * drop
+        if phase == 5:
+            glitched[:, :, 1] = np.clip(g * bleed, 0, 255)
+
+    return np.where(mask[:, :, np.newaxis] == 255, frame, np.clip(glitched, 0, 255).astype(np.uint8)).astype(np.uint8)
 
 
 def apply_ordered_dither(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos: float, frame_idx: int) -> np.ndarray:
-    """Bayer ordered dither overlay - retro-printed / ritual-encoded."""
+    """Bayer ordered dither with smooth intensity-based blend with original."""
     if intensity <= 0:
         return frame
     h, w = frame.shape[:2]
@@ -1089,10 +1262,11 @@ def apply_ordered_dither(frame: np.ndarray, mask: np.ndarray, intensity: int, ch
     bayer = np.tile(bayer4, (h // 4 + 2, w // 4 + 2))[:h, :w]
     thresh = bayer * (0.3 + intensity * 0.08)
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
-    dithered = (gray > thresh).astype(np.uint8) * 255
-    dithered_3ch = np.stack([dithered, dithered, dithered], axis=-1)
+    softness = np.clip((gray - thresh) * 8.0, 0, 1)
+    dithered_f = softness * 255.0
+    dithered_3ch = np.stack([dithered_f, dithered_f, dithered_f], axis=-1)
     amt = min(0.35, intensity * 0.06)
-    glitched = (1 - amt) * frame.astype(np.float32) + amt * dithered_3ch.astype(np.float32)
+    glitched = (1 - amt) * frame.astype(np.float32) + amt * dithered_3ch
     return np.where(mask[:, :, np.newaxis] == 255, frame, np.clip(glitched, 0, 255).astype(np.uint8)).astype(np.uint8)
 
 
@@ -1145,45 +1319,61 @@ def apply_phylactery_glow(frame: np.ndarray, mask: np.ndarray, intensity: int, c
 
 
 def apply_abyss_window(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos: float, frame_idx: int) -> np.ndarray:
-    """Abyss window: cut band, fill with void/starfield, rim glow. Portal interior."""
+    """Abyss window with twinkling starfield, soft rim glow, and wider activation."""
     if intensity <= 0:
         return frame
     h, w = frame.shape[:2]
     pos = frame_idx % EVENT_CYCLE
-    if pos not in (EVENT_PEAK_FRAME - 1, EVENT_PEAK_FRAME):
+    if pos < 3 or pos > 8:
         return frame
-    np.random.seed(frame_idx * 5555)
-    band_h = max(8, int(h * 0.08 * intensity))
+    ramp = 1.0 - abs(pos - EVENT_PEAK_FRAME) / (EVENT_PEAK_FRAME + 1)
+    ramp = max(0.3, ramp)
+    np.random.seed(5555)
+    band_h = max(8, int(h * 0.08 * intensity * ramp))
     y0 = int(h * (0.2 + 0.3 * np.sin(frame_idx * 0.2)))
     y0 = max(0, min(y0, h - band_h - 1))
     y1 = y0 + band_h
     if mask[y0:y1, :].mean() > 180:
         return frame
-    void = np.zeros((band_h, w, 3), dtype=np.uint8)
-    stars = np.random.rand(band_h, w) < 0.02
-    void[stars] = [255, 255, 255]
-    rim = np.zeros((band_h, w, 3), dtype=np.float32)
-    rim[0, :] = [60, 80, 60]
-    rim[-1, :] = [60, 80, 60]
-    rim[:, 0] = [60, 80, 60]
-    rim[:, -1] = [60, 80, 60]
-    glitched = frame.copy()
-    glitched[y0:y1, :] = np.clip(void.astype(np.float32) + rim, 0, 255).astype(np.uint8)
-    return glitched
+
+    void = np.zeros((band_h, w, 3), dtype=np.float32)
+    rng = np.random.RandomState(5555)
+    star_pos = rng.rand(band_h, w)
+    star_base = star_pos < 0.015
+    twinkle = np.sin(frame_idx * 0.8 + star_pos * 20.0) * 0.4 + 0.6
+    star_brightness = twinkle * rng.uniform(0.5, 1.0, (band_h, w))
+    star_mask = star_base.astype(np.float32) * star_brightness
+    void[:, :, 0] = star_mask * 200
+    void[:, :, 1] = star_mask * 220
+    void[:, :, 2] = star_mask * 255
+
+    rim_width = max(2, band_h // 6)
+    rim_fade = np.zeros(band_h, dtype=np.float32)
+    rim_fade[:rim_width] = np.linspace(1.0, 0.0, rim_width)
+    rim_fade[-rim_width:] = np.linspace(0.0, 1.0, rim_width)
+    rim_color = np.array([80, 120, 60], dtype=np.float32)
+    rim = rim_fade[:, np.newaxis, np.newaxis] * rim_color * 0.8
+
+    portal = np.clip(void + rim, 0, 255)
+    glitched = frame.copy().astype(np.float32)
+    alpha = ramp * 0.85
+    glitched[y0:y1, :] = (1 - alpha) * glitched[y0:y1, :] + alpha * portal
+    return np.clip(glitched, 0, 255).astype(np.uint8)
 
 
 def apply_fft_jitter(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos: float, frame_idx: int) -> np.ndarray:
-    """FFT phase jitter - subtle surreal shimmer. Face-protected."""
+    """FFT phase jitter with smoothed phase noise and wider activation window."""
     if intensity <= 0:
         return frame
     pos = frame_idx % EVENT_CYCLE
-    if pos != EVENT_PEAK_FRAME:
+    if pos < EVENT_PEAK_FRAME - 1 or pos > EVENT_PEAK_FRAME + 1:
         return frame
+    ramp = 1.0 - abs(pos - EVENT_PEAK_FRAME) * 0.35
     h, w = frame.shape[:2]
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
     fft = np.fft.fft2(gray)
-    np.random.seed(frame_idx * 6666)
-    phase_jitter = np.exp(1j * np.random.randn(h, w) * (intensity * 0.05))
+    phase_noise = _perlin_noise_2d(h, w, scale=6, octaves=2, seed=frame_idx * 6666)
+    phase_jitter = np.exp(1j * (phase_noise - 0.5) * intensity * 0.12 * ramp)
     fft_j = fft * phase_jitter
     shimmer = np.real(np.fft.ifft2(fft_j)).astype(np.float32)
     ratio = (shimmer + 128) / (gray + 128)
@@ -1192,20 +1382,20 @@ def apply_fft_jitter(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos:
 
 
 def apply_moire_grid(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos: float, frame_idx: int) -> np.ndarray:
-    """Moire: angled grid drifts 1px/frame, interacts with content. Cursed signal."""
+    """Vectorized moire grid with smooth angled lines and drift."""
     if intensity <= 0:
         return frame
     h, w = frame.shape[:2]
     drift = (frame_idx % 4) - 2
     line_int = max(4, 12 - intensity)
-    grid = np.zeros((h, w), dtype=np.float32)
     angle = 0.3 + 0.1 * np.sin(frame_idx * 0.1)
-    for i in range(-20, 25):
-        x0 = int(w / 2 + i * 30 * np.cos(angle) + drift) % (w + 50) - 25
-        for y in range(h):
-            x = int(x0 + y * np.tan(angle))
-            if 0 <= x < w and mask[y, x] < 200:
-                grid[y, max(0, x - 1):min(w, x + 2)] = 0.15
+
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    rotated = xx * np.cos(angle) + yy * np.sin(angle) + drift
+    pattern = np.abs(np.sin(rotated * np.pi / line_int))
+    grid = np.clip((1.0 - pattern) * 2.0 - 0.8, 0, 1) * 0.18
+    grid *= (mask < 200).astype(np.float32)
+
     glitched = frame.astype(np.float32) * (1 - grid[:, :, np.newaxis]) + grid[:, :, np.newaxis] * 128
     return np.where(mask[:, :, np.newaxis] == 255, frame, np.clip(glitched, 0, 255).astype(np.uint8)).astype(np.uint8)
 
@@ -1214,48 +1404,65 @@ def apply_ghost_trail(
     frame: np.ndarray, prev_frame: Optional[np.ndarray], mask: np.ndarray,
     intensity: int, frame_idx: int
 ) -> np.ndarray:
-    """Echo/ghost blend with previous frame. Trail decays fast - don't smear skull for 12 frames."""
+    """Directional ghost trail: previous frame is slightly shifted before blending for motion effect."""
     if prev_frame is None or intensity <= 0:
         return frame
-    # Fast decay: only strong near event peak (frames 5–7), else minimal
     pos = frame_idx % EVENT_CYCLE
     decay = 1.0 if 4 <= pos <= 8 else (0.3 if 3 <= pos <= 9 else 0.1)
     amt = min(0.5, intensity * 0.06 * decay)
-    blend = cv2.addWeighted(frame, 1 - amt, prev_frame, amt, 0)
+    drift_x = int(np.sin(frame_idx * 0.3) * intensity * 0.5)
+    drift_y = int(np.cos(frame_idx * 0.4) * intensity * 0.3)
+    if drift_x != 0 or drift_y != 0:
+        h, w = prev_frame.shape[:2]
+        M = np.float32([[1, 0, drift_x], [0, 1, drift_y]])
+        prev_shifted = cv2.warpAffine(prev_frame, M, (w, h), borderMode=cv2.BORDER_REPLICATE)
+    else:
+        prev_shifted = prev_frame
+    blend = cv2.addWeighted(frame, 1 - amt, prev_shifted, amt, 0)
     return np.where(mask[:, :, np.newaxis] == 255, frame, blend).astype(np.uint8)
 
 
 def apply_block_tear(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos: float, frame_idx: int) -> np.ndarray:
-    """Block tear with snap-back (repair moment) - feels possessed. Coherent noise for tear positions."""
+    """Block tear with soft-edged slices and snap-back repair moments."""
     if intensity <= 0:
         return frame
     h, w = frame.shape[:2]
     np.random.seed(frame_idx * 4321)
     slice_h = max(6, 24 - intensity * 2)
-    glitched = frame.copy()
+    glitched = frame.copy().astype(np.float32)
+    orig = frame.astype(np.float32)
     max_slices = max(2, 8 - intensity)
-    # Snap-back: repair moment (no tear) near event decay
+    feather = max(2, slice_h // 4)
+
     pos = frame_idx % EVENT_CYCLE
     repair = 7 <= pos <= 10 and np.random.rand() < 0.4
     if repair:
-        return np.where(mask[:, :, np.newaxis] == 255, frame, glitched).astype(np.uint8)
+        return np.where(mask[:, :, np.newaxis] == 255, frame, frame).astype(np.uint8)
 
-    # Coherent noise: tear positions tied to frame_idx so they track consistently
     base_y = (frame_idx * 17) % max(1, h - slice_h * max_slices)
     n_slices = 0
     for i in range(max_slices):
         if n_slices >= max_slices:
             break
         y = (base_y + i * (h // max_slices)) % max(1, h - slice_h)
-        if y + slice_h > h:
+        y_end = min(y + slice_h, h)
+        if y_end <= y:
             continue
-        if mask[y:y+slice_h, :].mean() < 220:
-            offset = int(np.random.randn() * intensity * 4)
-            offset = np.clip(offset, -intensity * 6, intensity * 6)
-            if offset != 0:
-                glitched[y:y+slice_h, :] = np.roll(frame[y:y+slice_h, :].copy(), offset, axis=1)
+        if mask[y:y_end, :].mean() < 220:
+            offset_f = np.clip(np.random.randn() * intensity * 4, -intensity * 6, intensity * 6)
+            if abs(offset_f) > 0.5:
+                band = frame[y:y_end, :]
+                shifted = _subpixel_shift(band, offset_f, 0, w, y_end - y).astype(np.float32)
+                bh = y_end - y
+                fade = np.ones(bh, dtype=np.float32)
+                ramp_len = min(feather, bh // 2)
+                if ramp_len > 0:
+                    fade[:ramp_len] = np.linspace(0.0, 1.0, ramp_len)
+                    fade[-ramp_len:] = np.linspace(1.0, 0.0, ramp_len)
+                fade_3d = fade[:, np.newaxis, np.newaxis]
+                glitched[y:y_end, :] = fade_3d * shifted + (1 - fade_3d) * orig[y:y_end, :]
                 n_slices += 1
-    return np.where(mask[:, :, np.newaxis] == 255, frame, glitched).astype(np.uint8)
+    return np.where(mask[:, :, np.newaxis] == 255, frame, np.clip(glitched, 0, 255).astype(np.uint8)).astype(np.uint8)
 
 
 def apply_transition_hit(
@@ -1410,19 +1617,23 @@ def apply_vignette(frame: np.ndarray, mask: np.ndarray, intensity: int, frame_id
 
 
 def apply_bloom(frame: np.ndarray, mask: np.ndarray, intensity: int, frame_idx: int) -> np.ndarray:
-    """Soft glow on very limited emissive pixels (eyes/runes) - don't touch outlines."""
+    """HDR-style bloom with multi-pass blur for prominent glow on emissive areas."""
     if intensity <= 0:
         return frame
-    # Restrict to very bright pixels only (emissive) - avoid smudging pixel art
-    bright = cv2.inRange(frame, (235, 235, 235), (255, 255, 255))
+    thresh = max(180, 240 - intensity * 8)
+    bright = cv2.inRange(frame, (thresh, thresh, thresh), (255, 255, 255))
     bright = cv2.bitwise_and(bright, mask)
-    # Erode to keep only small bright spots, not large areas
-    kernel = np.ones((2, 2), np.uint8)
-    bright = cv2.erode(bright, kernel)
-    blur_size = min(7, max(3, intensity * 2) | 1)
-    glow = cv2.GaussianBlur(cv2.merge([bright, bright, bright]), (blur_size, blur_size), 0)
-    amt = intensity * 0.03
-    result = np.clip(frame.astype(np.float32) + glow.astype(np.float32) * amt, 0, 255).astype(np.uint8)
+    bright_3ch = cv2.merge([bright, bright, bright]).astype(np.float32) / 255.0
+    bright_color = frame.astype(np.float32) * bright_3ch
+
+    blur_small = max(5, intensity * 4) | 1
+    blur_large = max(15, intensity * 8) | 1
+    glow_tight = cv2.GaussianBlur(bright_color, (blur_small, blur_small), blur_small * 0.4)
+    glow_wide = cv2.GaussianBlur(bright_color, (blur_large, blur_large), blur_large * 0.4)
+    glow = glow_tight * 0.6 + glow_wide * 0.4
+
+    amt = 0.05 + intensity * 0.06
+    result = np.clip(frame.astype(np.float32) + glow * amt, 0, 255).astype(np.uint8)
     return np.where(mask[:, :, np.newaxis] == 255, result, frame).astype(np.uint8)
 
 
@@ -1447,6 +1658,77 @@ def apply_edge_pulse(
         + edge_weight[:, :, np.newaxis] * edge_effect
     )
     return np.clip(blend, 0, 255).astype(np.uint8)
+
+
+def apply_displacement_map(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos: float, frame_idx: int) -> np.ndarray:
+    """Perlin noise displacement map for organic heat-shimmer warping (distinct from melting)."""
+    if intensity <= 0:
+        return frame
+    h, w = frame.shape[:2]
+    phase = frame_idx * 0.08
+    scale = max(3, 8 - intensity // 2)
+    noise_x = _perlin_noise_2d(h, w, scale=scale, octaves=3, seed=frame_idx * 11111)
+    noise_y = _perlin_noise_2d(h, w, scale=scale + 2, octaves=3, seed=frame_idx * 11111 + 7777)
+    amp = 1.0 + intensity * 0.6 + chaos * 1.5
+    shimmer_x = np.sin(np.arange(h, dtype=np.float32)[:, np.newaxis] * 0.08 + phase) * amp * 0.4
+    shimmer_y = np.cos(np.arange(w, dtype=np.float32)[np.newaxis, :] * 0.06 + phase * 0.8) * amp * 0.3
+    x_coords = np.arange(w, dtype=np.float32)[np.newaxis, :]
+    y_coords = np.arange(h, dtype=np.float32)[:, np.newaxis]
+    map_x = x_coords + (noise_x - 0.5) * amp * 3.0 + shimmer_x
+    map_y = y_coords + (noise_y - 0.5) * amp * 2.0 + shimmer_y
+    map_x = np.where(mask < 128, map_x, x_coords).astype(np.float32)
+    map_y = np.where(mask < 128, map_y, y_coords).astype(np.float32)
+    glitched = cv2.remap(frame, np.ascontiguousarray(map_x), np.ascontiguousarray(map_y),
+                         cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+    return np.where(mask[:, :, np.newaxis] == 255, frame, glitched).astype(np.uint8)
+
+
+def apply_color_halftone(frame: np.ndarray, mask: np.ndarray, intensity: int, chaos: float, frame_idx: int) -> np.ndarray:
+    """CMYK halftone dot pattern at configurable angles (distinct from ordered_dither)."""
+    if intensity <= 0:
+        return frame
+    h, w = frame.shape[:2]
+    dot_size = max(3, 8 - intensity // 2)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    angles = [0.261, 1.309, 0.785, 0.0]
+    channels = cv2.split(frame.astype(np.float32))
+    result_channels = []
+    for ch_idx, (ch, angle) in enumerate(zip(channels, angles)):
+        rx = xx * np.cos(angle) + yy * np.sin(angle)
+        ry = -xx * np.sin(angle) + yy * np.cos(angle)
+        dot_pattern = (np.sin(rx * np.pi / dot_size) * np.sin(ry * np.pi / dot_size))
+        dot_pattern = (dot_pattern + 1.0) / 2.0
+        normalized = ch / 255.0
+        halftone = (normalized > (1.0 - dot_pattern * 0.5)).astype(np.float32) * 255.0
+        result_channels.append(halftone)
+    halftoned = cv2.merge(result_channels)
+    amt = min(0.5, intensity * 0.08)
+    glitched = (1 - amt) * frame.astype(np.float32) + amt * halftoned
+    return np.where(mask[:, :, np.newaxis] == 255, frame, np.clip(glitched, 0, 255).astype(np.uint8)).astype(np.uint8)
+
+
+def apply_temporal_echo(
+    frame: np.ndarray, prev_frame: Optional[np.ndarray], mask: np.ndarray,
+    intensity: int, chaos: float, frame_idx: int
+) -> np.ndarray:
+    """Multi-frame temporal echo: stacks shifted copies with decreasing opacity (distinct from ghost_trail)."""
+    if prev_frame is None or intensity <= 0:
+        return frame
+    h, w = frame.shape[:2]
+    n_echoes = min(4, max(2, intensity // 2))
+    result = frame.astype(np.float32)
+    total_weight = 1.0
+    for i in range(1, n_echoes + 1):
+        alpha = 0.15 * intensity / (i * 2.0)
+        alpha = min(alpha, 0.3)
+        dx = int(np.sin(frame_idx * 0.2 + i) * i * 1.5)
+        dy = int(np.cos(frame_idx * 0.3 + i) * i * 0.8)
+        M = np.float32([[1, 0, dx], [0, 1, dy]])
+        echo = cv2.warpAffine(prev_frame, M, (w, h), borderMode=cv2.BORDER_REPLICATE)
+        result = result * (1 - alpha) + echo.astype(np.float32) * alpha
+        total_weight += alpha
+    result = np.clip(result, 0, 255).astype(np.uint8)
+    return np.where(mask[:, :, np.newaxis] == 255, frame, result).astype(np.uint8)
 
 
 def _all_effects_disabled(params: GlitchParams) -> bool:
@@ -1497,6 +1779,21 @@ def _all_effects_disabled(params: GlitchParams) -> bool:
         params.shader_hexagonal_warp_intensity,
         params.shader_caustic_flow_intensity,
         params.shader_thermal_distort_intensity,
+        params.shader_void_tendrils_intensity,
+        params.shader_spectral_prism_intensity,
+        params.shader_soul_fire_intensity,
+        params.shader_electric_arc_intensity,
+        params.shader_dimensional_rift_intensity,
+        params.shader_glitch_hologram_intensity,
+        params.shader_crystalline_frost_intensity,
+        params.shader_pixel_rain_intensity,
+        params.shader_liquid_metal_intensity,
+        params.shader_data_corruption_intensity,
+        params.shader_vhs_rewind_intensity,
+        params.shader_holographic_foil_intensity,
+        params.displacement_map,
+        params.color_halftone,
+        params.temporal_echo,
     ]
     if any(v > 0 for v in effect_list) or params.color_scheme not in (None, "default", "custom"):
         return False
@@ -1528,6 +1825,21 @@ def process_frame(frame: np.ndarray, mask: np.ndarray, params: GlitchParams,
         params.shader_hexagonal_warp_intensity == 0 and
         params.shader_caustic_flow_intensity == 0 and
         params.shader_thermal_distort_intensity == 0 and
+        params.shader_void_tendrils_intensity == 0 and
+        params.shader_spectral_prism_intensity == 0 and
+        params.shader_soul_fire_intensity == 0 and
+        params.shader_electric_arc_intensity == 0 and
+        params.shader_dimensional_rift_intensity == 0 and
+        params.shader_glitch_hologram_intensity == 0 and
+        params.shader_crystalline_frost_intensity == 0 and
+        params.shader_pixel_rain_intensity == 0 and
+        params.shader_liquid_metal_intensity == 0 and
+        params.shader_data_corruption_intensity == 0 and
+        params.shader_vhs_rewind_intensity == 0 and
+        params.shader_holographic_foil_intensity == 0 and
+        params.displacement_map == 0 and
+        params.color_halftone == 0 and
+        params.temporal_echo == 0 and
         params.color_scheme in (None, "default", "custom", "")):
 
         print(f"[Liche DEBUG] Frame {frame_idx} — ZERO effects active. Returning CLEAN original frame.")
@@ -1569,6 +1881,9 @@ def process_frame(frame: np.ndarray, mask: np.ndarray, params: GlitchParams,
         (params.abyss_window, apply_abyss_window, True),
         (params.fft_jitter, apply_fft_jitter, True),
         (params.moire_grid, apply_moire_grid, True),
+        (params.displacement_map, apply_displacement_map, True),
+        (params.color_halftone, apply_color_halftone, True),
+        (params.temporal_echo, lambda f, m, i, c, idx: apply_temporal_echo(f, prev_frame, m, i, c, idx), True),
         # 2. Color distortions (mask-protected)
         (params.rgb_shift_intensity, apply_rgb_channel_shift, True),
         (params.chromatic_aberration, apply_chromatic_aberration, True),

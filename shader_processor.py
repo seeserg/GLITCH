@@ -17,10 +17,11 @@ import numpy as np
 
 
 def _log(msg: str) -> None:
-    try:
-        print(msg, file=sys.stderr, flush=True)
-    except OSError:
-        pass
+    for stream in (sys.stderr, sys.stdout):
+        try:
+            print(msg, file=stream, flush=True)
+        except OSError:
+            pass
 
 
 _QUAD_VERTS = np.array([
@@ -104,7 +105,7 @@ class ShaderProcessor:
             self._moderngl = None
 
     def _precompile_all_shaders(self) -> None:
-        """Compile every .frag and create its VAO immediately."""
+        """Compile every .frag not already loaded and create its VAO."""
         vert_path = os.path.join(self._shaders_dir, "vertex_quad.glsl")
         if not os.path.isfile(vert_path):
             _log("[Liche] vertex_quad.glsl not found, skipping precompile")
@@ -116,7 +117,7 @@ class ShaderProcessor:
         compiled = 0
         for frag_path in sorted(frag_files):
             name = os.path.splitext(os.path.basename(frag_path))[0]
-            if name == "template":
+            if name == "template" or name in self._programs:
                 continue
             with open(frag_path) as f:
                 frag_src = f.read()
@@ -133,7 +134,8 @@ class ShaderProcessor:
                 _log(f"[Liche] Precompile failed for '{name}': {e}")
                 self._programs[name] = None
 
-        _log(f"[Liche] Precompiled {compiled} shaders + VAOs")
+        if compiled > 0:
+            _log(f"[Liche] Precompiled {compiled} new shaders + VAOs (total: {len(self._programs)})")
 
     def _reinit_context(self) -> bool:
         """Tear down and rebuild the entire GL context. Returns True on success."""
@@ -211,6 +213,11 @@ class ShaderProcessor:
         chain = self._get_shader_intensity_params(params)
         if not chain:
             return frame
+
+        missing = [name for name, _ in chain if name not in self._programs]
+        if missing:
+            _log(f"[Liche] Missing shaders {missing} — full context reinit")
+            self._reinit_context()
 
         if frame_idx == 0:
             _log(f"[Liche] Shader chain: {[(n, i) for n, i in chain]}")

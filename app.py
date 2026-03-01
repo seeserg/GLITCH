@@ -14,7 +14,10 @@ import streamlit as st
 from PIL import Image as PILImage
 
 from glitch_processor import GlitchParams
-from gif_processor import process_images_to_gif, convert_gif_to_mp4, GIF_TARGET_BYTES
+from gif_processor import (
+    process_images_to_gif, convert_gif_to_mp4, GIF_TARGET_BYTES,
+    save_as_webp, save_as_apng, RESOLUTION_OPTIONS, GIF_TARGET_SIZE,
+)
 from glitch_presets import get_preset_for_rarity, roll_preset_rarity
 from series_generator import generate_pair, generate_batch, SERIES_ROOT
 from gif_overlay_utils import overlay_gif_on_image
@@ -143,6 +146,10 @@ div[data-baseweb="select"] {
     background: rgba(255, 0, 64, 0.1) !important;
     border: 1px solid var(--blood-red) !important;
 }
+
+div[data-testid="stExpander"] summary:hover {
+    color: var(--neon-cyan) !important;
+}
 """
 
 st.markdown(f"<style>{CYBERPUNK_CSS}</style>", unsafe_allow_html=True)
@@ -201,9 +208,9 @@ def get_random_preset_for_rarity(rarity: str, seed: int | None = None) -> tuple[
 
 
 def render_sidebar():
-    """Glitch effect controls for Photos → GIF mode."""
+    """Glitch effect controls for Photos → GIF mode with collapsible sections."""
     st.sidebar.markdown("## ⚙️ Glitch Controls")
-    st.sidebar.markdown("*For Photos → GIF mode*")
+    st.sidebar.markdown("*For Custom GIF mode*")
     st.sidebar.markdown("---")
 
     all_presets = {**BUILTIN_PRESETS, **load_saved_presets()}
@@ -215,104 +222,188 @@ def render_sidebar():
     )
     preset = all_presets.get(preset_choice) or {}
 
-    chaos = st.sidebar.slider("Chaos Level", 0.0, 1.0, 0.0, 0.1, key="sb_chaos")
-    mask_sensitivity = st.sidebar.slider("Mask sensitivity", 0.0, 1.0, 0.0, 0.05, key="sb_mask_sens")
-    mask_soft = st.sidebar.slider("Soft edge (px)", 0, 25, 0, 1, key="sb_mask_soft")
+    chaos = st.sidebar.slider("Chaos Level", 0.0, 1.0, 0.0, 0.1, key="sb_chaos",
+                               help="Global randomness multiplier for all effects")
+    mask_sensitivity = st.sidebar.slider("Mask sensitivity", 0.0, 1.0, 0.0, 0.05, key="sb_mask_sens",
+                                          help="How aggressively the auto-mask detects the subject")
+    mask_soft = st.sidebar.slider("Soft edge (px)", 0, 25, 0, 1, key="sb_mask_soft",
+                                   help="Feather width for mask edge blending")
     mask_opacity = st.sidebar.slider(
-        "Mask opacity",
-        0.0, 1.0, 1.0, 0.05,
-        key="sb_mask_opacity",
-        help="1=subject protected, 0=effects on both subject & background",
+        "Mask opacity", 0.0, 1.0, 1.0, 0.05, key="sb_mask_opacity",
+        help="1=subject fully protected, 0=effects apply to subject too",
     )
 
-    st.sidebar.markdown("### Core")
-    rgb_shift = st.sidebar.slider("RGB Shift", 0, 10, 0, key="sb_rgb")
-    chromatic = st.sidebar.slider("Chromatic Aberration", 0, 10, 0, key="sb_chromatic")
-    scanlines = st.sidebar.slider("Scanlines", 0, 10, 0, key="sb_scanlines")
-    noise = st.sidebar.slider("Digital Noise", 0, 10, 0, key="sb_noise")
-    pixelation = st.sidebar.slider("Pixelation", 0, 10, 0, key="sb_pixelation")
-    datamosh = st.sidebar.slider("Datamosh", 0, 10, 0, key="sb_datamosh")
-    melting = st.sidebar.slider("Melting", 0, 10, 0, key="sb_melting")
+    with st.sidebar.expander("Core Effects", expanded=True):
+        rgb_shift = st.slider("RGB Shift", 0, 10, 0, key="sb_rgb",
+                               help="Separate R/G/B channels with sub-pixel precision")
+        chromatic = st.slider("Chromatic Aberration", 0, 10, 0, key="sb_chromatic",
+                               help="Radial lens fringing from center outward")
+        scanlines = st.slider("Scanlines", 0, 10, 0, key="sb_scanlines",
+                               help="CRT phosphor pattern with RGB sub-pixel tint")
+        noise = st.slider("Digital Noise", 0, 10, 0, key="sb_noise",
+                           help="Organic Perlin-based noise texture")
+        pixelation = st.slider("Pixelation", 0, 10, 0, key="sb_pixelation",
+                                help="Localized pixel enlargement in random bands")
+        datamosh = st.slider("Datamosh", 0, 10, 0, key="sb_datamosh",
+                              help="Optical flow warping from previous frame")
+        melting = st.slider("Melting", 0, 10, 0, key="sb_melting",
+                             help="Liquid noise-based displacement warping")
 
-    st.sidebar.markdown("### Spatial / Geometry")
-    flow_warp = st.sidebar.slider("Flow Warp", 0, 10, 0, key="sb_flow_warp", help="Displacement field - liquid space-time distortion")
-    slit_scan = st.sidebar.slider("Slit-Scan", 0, 10, 0, key="sb_slit_scan", help="Temporal smearing from past frames")
-    parallax_split = st.sidebar.slider("Parallax Split", 0, 10, 0, key="sb_parallax_split", help="Depth layers offset - soul leaving body")
-    voronoi_shatter = st.sidebar.slider("Voronoi Shatter", 0, 10, 0, key="sb_voronoi_shatter", help="Tessellated crystalline fracture")
+    with st.sidebar.expander("Spatial / Geometry", expanded=False):
+        flow_warp = st.slider("Flow Warp", 0, 10, 0, key="sb_flow_warp",
+                               help="Displacement field - liquid space-time distortion")
+        slit_scan = st.slider("Slit-Scan", 0, 10, 0, key="sb_slit_scan",
+                               help="Temporal smearing - vertical slices from past frames")
+        parallax_split = st.slider("Parallax Split", 0, 10, 0, key="sb_parallax_split",
+                                    help="Depth layer offsets - soul leaving body effect")
+        voronoi_shatter = st.slider("Voronoi Shatter", 0, 10, 0, key="sb_voronoi_shatter",
+                                     help="Tessellated crystalline fracture with feathered edges")
+        displacement_map = st.slider("Displacement Map", 0, 10, 0, key="sb_displacement_map",
+                                      help="Heat shimmer - organic Perlin noise warping")
+        frame_drift = st.slider("Frame Drift", 0, 10, 0, key="sb_frame_drift",
+                                 help="Background wobble while subject stays fixed")
 
-    st.sidebar.markdown("### Temporal")
-    echo_crown = st.sidebar.slider("Echo Crown", 0, 10, 0, key="sb_echo_crown", help="Directional echoes with decay mask")
-    strobe_phase = st.sidebar.slider("Strobe Phase", 0, 10, 0, key="sb_strobe_phase", help="Luminance posterize snap at boundary")
-    frame_drop = st.sidebar.slider("Frame Drop", 0, 10, 0, key="sb_frame_drop", help="Repeat frame + strong hit - VHS authentic")
+    with st.sidebar.expander("Temporal", expanded=False):
+        echo_crown = st.slider("Echo Crown", 0, 10, 0, key="sb_echo_crown",
+                                help="Directional echoes with decay - halo behind subject")
+        strobe_phase = st.slider("Strobe Phase", 0, 10, 0, key="sb_strobe_phase",
+                                  help="Luminance posterize snap at event peak")
+        frame_drop = st.slider("Frame Drop", 0, 10, 0, key="sb_frame_drop",
+                                help="Repeat frame + strong RGB hit - VHS authentic")
+        temporal_echo = st.slider("Temporal Echo", 0, 10, 0, key="sb_temporal_echo",
+                                   help="Multi-layer shifted ghost copies with decay")
 
-    st.sidebar.markdown("### Palette / Color (advanced)")
-    palette_cycle = st.sidebar.slider("Palette Cycle", 0, 10, 0, key="sb_palette_cycle", help="Indexed hue rotation")
-    chroma_collapse = st.sidebar.slider("Chroma Collapse", 0, 10, 0, key="sb_chroma_collapse", help="Monochrome → oversaturate rebound - soul drain")
-    ordered_dither = st.sidebar.slider("Ordered Dither", 0, 10, 0, key="sb_ordered_dither", help="Bayer dither overlay - ritual encoded")
+    with st.sidebar.expander("Palette / Color", expanded=False):
+        palette_cycle = st.slider("Palette Cycle", 0, 10, 0, key="sb_palette_cycle",
+                                   help="Animated hue rotation on background")
+        chroma_collapse = st.slider("Chroma Collapse", 0, 10, 0, key="sb_chroma_collapse",
+                                     help="Single channel kill + color bleed rebound")
+        ordered_dither = st.slider("Ordered Dither", 0, 10, 0, key="sb_ordered_dither",
+                                    help="Soft Bayer dither pattern overlay")
+        color_halftone = st.slider("Color Halftone", 0, 10, 0, key="sb_color_halftone",
+                                    help="CMYK halftone dot pattern at angled screens")
+        color_scheme = st.selectbox(
+            "Color tint",
+            options=["default", "cold", "warm", "neon", "inverted", "vhs", "sepia", "cyan_magenta", "blood"],
+            index=0, key="sb_color",
+            help="Global color grading applied to glitch regions",
+        )
 
-    st.sidebar.markdown("### Occult Tech")
-    sigil_ring = st.sidebar.slider("Sigil Ring", 0, 10, 0, key="sb_sigil_ring", help="Broken ring + tick marks")
-    phylactery_glow = st.sidebar.slider("Phylactery Glow", 0, 10, 0, key="sb_phylactery_glow", help="Floating orb pulse, chroma bleed")
-    abyss_window = st.sidebar.slider("Abyss Window", 0, 10, 0, key="sb_abyss_window", help="Portal interior - void/starfield band")
+    with st.sidebar.expander("Glitch Art", expanded=False):
+        pixel_sort = st.slider("Pixel Sort", 0, 10, 0, key="sb_pixel_sort",
+                                help="Sort pixels by luminance with feathered segment edges")
+        neon_bars = st.slider("Neon Bars", 0, 10, 0, key="sb_neon_bars",
+                               help="Sigil light-leak bars with rune tick marks")
+        edge_dissolve = st.slider("Edge Dissolve", 0, 10, 0, key="sb_edge_dissolve",
+                                   help="Noise-based dissolution into dark static")
+        chroma_dropout = st.slider("Chroma Dropout", 0, 10, 0, key="sb_chroma_dropout",
+                                    help="YUV chroma drop → oversaturated rebound")
+        ghost_trail = st.slider("Ghost Trail", 0, 10, 0, key="sb_ghost_trail",
+                                 help="Directional motion blur blend with previous frame")
+        block_tear = st.slider("Block Tear", 0, 10, 0, key="sb_block_tear",
+                                help="Horizontal band shifts with snap-back repair")
 
-    st.sidebar.markdown("### Mathy Glitches")
-    fft_jitter = st.sidebar.slider("FFT Jitter", 0, 10, 0, key="sb_fft_jitter", help="Phase perturbation - surreal shimmer")
-    moire_grid = st.sidebar.slider("Moiré Grid", 0, 10, 0, key="sb_moire_grid", help="Angled drifting grid - cursed signal")
+    with st.sidebar.expander("Atmosphere", expanded=False):
+        tv_static = st.slider("TV Static", 0, 10, 0, key="sb_tv_static",
+                               help="Scanline-correlated noise for authentic CRT look")
+        film_grain = st.slider("Film Grain", 0, 10, 0, key="sb_film_grain",
+                                help="Luminance-dependent grain - stronger in shadows")
+        vignette = st.slider("Vignette", 0, 10, 0, key="sb_vignette",
+                              help="Radial edge darkening with soft falloff")
+        bloom = st.slider("Bloom", 0, 10, 0, key="sb_bloom",
+                           help="HDR glow on bright emissive areas")
+        vhs = st.slider("VHS Tracking", 0, 10, 0, key="sb_vhs",
+                          help="Horizontal tracking errors with color bleeding")
+        crt = st.slider("CRT Flicker", 0, 10, 0, key="sb_crt",
+                          help="Brightness flicker with occasional line dropout")
+        bitcrush = st.slider("Bitcrush", 0, 10, 0, key="sb_bitcrush",
+                              help="Bit depth reduction with ordered dithering")
+        rolling = st.slider("Rolling Scanlines", 0, 10, 0, key="sb_rolling",
+                              help="Scrolling sine-wave scanlines")
 
-    st.sidebar.markdown("### GLSL Shaders")
-    shader_necrotic = st.sidebar.slider("Necrotic Iridescent Flow", 0, 10, 0, key="sb_shader_necrotic", help="Organic liquid warp, purples→greens→void black, feedback flow")
-    shader_hexagonal = st.sidebar.slider("Hexagonal Warp", 0, 10, 0, key="sb_shader_hexagonal", help="Honeycomb cells with liquid distortion inside each cell")
-    shader_caustic = st.sidebar.slider("Caustic Flow", 0, 10, 0, key="sb_shader_caustic", help="Underwater/glass light caustics, refraction ripples")
-    shader_thermal = st.sidebar.slider("Thermal Distort", 0, 10, 0, key="sb_shader_thermal", help="Heat-wave shimmer, hot pavement liquid effect")
+    with st.sidebar.expander("Occult Tech", expanded=False):
+        sigil_ring = st.slider("Sigil Ring", 0, 10, 0, key="sb_sigil_ring",
+                                help="Pulsing broken ring with tick marks and gaps")
+        phylactery_glow = st.slider("Phylactery Glow", 0, 10, 0, key="sb_phylactery_glow",
+                                     help="Floating orb with gaussian glow + chroma bleed")
+        abyss_window = st.slider("Abyss Window", 0, 10, 0, key="sb_abyss_window",
+                                  help="Portal band with twinkling starfield and rim glow")
 
-    st.sidebar.markdown("### Transitions (A↔B boundary)")
-    with st.sidebar.expander("Transition effects", expanded=False):
-        trans_band_wipe = st.slider("Band Wipe", 0, 10, 0, key="sb_trans_band", help="Horizontal bands with jagged edges")
-        trans_diagonal_rip = st.slider("Diagonal Rip", 0, 10, 0, key="sb_trans_diag", help="Diagonal band + rim glow")
-        trans_slit_scan = st.slider("Slit-Scan Swap", 0, 10, 0, key="sb_trans_slit", help="Vertical slices A→B")
-        trans_pixel_patch = st.slider("Pixel Scramble Patch", 0, 10, 0, key="sb_trans_patch", help="Localized blocky scramble")
-        trans_edge_reveal = st.slider("Edge-First Reveal", 0, 10, 0, key="sb_trans_edge", help="B along silhouette, then fill")
-        trans_voronoi = st.slider("Voronoi Shatter Swap", 0, 10, 0, key="sb_trans_voronoi", help="Crystalline fracture")
-        trans_phase_echo = st.slider("Phase Offset Echo", 0, 10, 0, key="sb_trans_phase", help="Double exposure two skulls")
-        trans_palette_snap = st.slider("Palette Snap", 0, 10, 0, key="sb_trans_palette", help="Posterize then snap to B")
-        trans_chroma_rebound = st.slider("Chroma Dropout Rebound", 0, 10, 0, key="sb_trans_chroma", help="Monochrome → oversat")
-        trans_scanline_gate = st.slider("Scanline Gate", 0, 10, 0, key="sb_trans_scanline", help="Rolling scanline A/B split")
-        trans_micro_jitter = st.slider("Micro Jitter RGB", 0, 10, 0, key="sb_trans_jitter", help="1-2px jitter + RGB snap")
-        trans_noise_crossfade = st.slider("Noise Threshold Crossfade", 0, 10, 0, key="sb_trans_noise", help="Seeded noise reveal")
+    with st.sidebar.expander("Mathy Glitches", expanded=False):
+        fft_jitter = st.slider("FFT Jitter", 0, 10, 0, key="sb_fft_jitter",
+                                help="Fourier phase perturbation - surreal shimmer")
+        moire_grid = st.slider("Moiré Grid", 0, 10, 0, key="sb_moire_grid",
+                                help="Angled drifting interference grid pattern")
 
-    st.sidebar.markdown("### Glitch Art")
-    pixel_sort = st.sidebar.slider("Pixel Sort", 0, 10, 0, key="sb_pixel_sort")
-    neon_bars = st.sidebar.slider("Neon Bars", 0, 10, 0, key="sb_neon_bars")
-    edge_dissolve = st.sidebar.slider("Edge Dissolve", 0, 10, 0, key="sb_edge_dissolve")
-    chroma_dropout = st.sidebar.slider("Chroma Dropout", 0, 10, 0, key="sb_chroma_dropout", help="YUV: grey drop → oversaturated rebound")
-    ghost_trail = st.sidebar.slider("Ghost Trail", 0, 10, 0, key="sb_ghost_trail")
-    block_tear = st.sidebar.slider("Block Tear", 0, 10, 0, key="sb_block_tear")
+    with st.sidebar.expander("GLSL Shaders", expanded=False):
+        shader_necrotic = st.slider("Necrotic Iridescent Flow", 0, 10, 0, key="sb_shader_necrotic",
+                                     help="Organic liquid warp, purples→greens→void black")
+        shader_hexagonal = st.slider("Hexagonal Warp", 0, 10, 0, key="sb_shader_hexagonal",
+                                      help="Honeycomb cells with liquid distortion")
+        shader_caustic = st.slider("Caustic Flow", 0, 10, 0, key="sb_shader_caustic",
+                                    help="Underwater caustic light refraction ripples")
+        shader_thermal = st.slider("Thermal Distort", 0, 10, 0, key="sb_shader_thermal",
+                                    help="Heat-wave shimmer, hot pavement liquid effect")
+        shader_void = st.slider("Void Tendrils", 0, 10, 0, key="sb_shader_void",
+                                 help="Dark inky tendrils creeping inward via domain-warped FBM")
+        shader_prism = st.slider("Spectral Prism", 0, 10, 0, key="sb_shader_prism",
+                                  help="Prismatic rainbow refraction with radial chromatic split")
+        shader_fire = st.slider("Soul Fire", 0, 10, 0, key="sb_shader_fire",
+                                 help="Necromantic green/purple procedural flames")
+        shader_electric = st.slider("Electric Arc", 0, 10, 0, key="sb_shader_electric",
+                                     help="Branching lightning bolts with plasma glow")
+        shader_rift = st.slider("Dimensional Rift", 0, 10, 0, key="sb_shader_rift",
+                                 help="Fractal cracks revealing void starfield")
+        shader_hologram = st.slider("Glitch Hologram", 0, 10, 0, key="sb_shader_hologram",
+                                     help="Holographic scanlines, rainbow interference, dropout")
+        shader_frost = st.slider("Crystalline Frost", 0, 10, 0, key="sb_shader_frost",
+                                  help="Ice crystal Voronoi patterns from edges")
+        shader_pixel_rain = st.slider("Pixel Rain", 0, 10, 0, key="sb_shader_pixel_rain",
+                                       help="Matrix-style falling pixel columns")
+        shader_liquid_metal = st.slider("Liquid Metal", 0, 10, 0, key="sb_shader_liquid_metal",
+                                         help="Chrome/mercury reflective surface with ripples")
+        shader_data_corrupt = st.slider("Data Corruption", 0, 10, 0, key="sb_shader_data_corrupt",
+                                         help="Fake JPEG artifact blocks with channel shifts")
+        shader_vhs_rewind = st.slider("VHS Rewind", 0, 10, 0, key="sb_shader_vhs_rewind",
+                                       help="Fast horizontal smear with vertical roll")
+        shader_holo_foil = st.slider("Holographic Foil", 0, 10, 0, key="sb_shader_holo_foil",
+                                      help="Rainbow interference patterns shifting with angle")
 
-    st.sidebar.markdown("### Atmosphere")
-    tv_static = st.sidebar.slider("TV Static", 0, 10, 0, key="sb_tv_static")
-    film_grain = st.sidebar.slider("Film Grain", 0, 10, 0, key="sb_film_grain")
-    vignette = st.sidebar.slider("Vignette", 0, 10, 0, key="sb_vignette")
-    bloom = st.sidebar.slider("Bloom", 0, 10, 0, key="sb_bloom")
-    vhs = st.sidebar.slider("VHS Tracking", 0, 10, 0, key="sb_vhs")
-    crt = st.sidebar.slider("CRT Flicker", 0, 10, 0, key="sb_crt")
-    bitcrush = st.sidebar.slider("Bitcrush", 0, 10, 0, key="sb_bitcrush")
+    with st.sidebar.expander("Transitions (A↔B boundary)", expanded=False):
+        trans_band_wipe = st.slider("Band Wipe", 0, 10, 0, key="sb_trans_band",
+                                     help="Horizontal bands with jagged edges, mask-aware")
+        trans_diagonal_rip = st.slider("Diagonal Rip", 0, 10, 0, key="sb_trans_diag",
+                                        help="Diagonal band + rim glow, mask-aware")
+        trans_slit_scan = st.slider("Slit-Scan Swap", 0, 10, 0, key="sb_trans_slit",
+                                     help="Vertical slices A→B with feathered edges")
+        trans_pixel_patch = st.slider("Pixel Scramble Patch", 0, 10, 0, key="sb_trans_patch",
+                                       help="Localized blocky scramble in center")
+        trans_edge_reveal = st.slider("Edge-First Reveal", 0, 10, 0, key="sb_trans_edge",
+                                       help="B reveals along silhouette first, then fills")
+        trans_voronoi = st.slider("Voronoi Shatter Swap", 0, 10, 0, key="sb_trans_voronoi",
+                                   help="Crystalline fracture with mask protection")
+        trans_phase_echo = st.slider("Phase Offset Echo", 0, 10, 0, key="sb_trans_phase",
+                                      help="Double exposure - two skulls")
+        trans_palette_snap = st.slider("Palette Snap", 0, 10, 0, key="sb_trans_palette",
+                                        help="Smooth posterize crossfade into B")
+        trans_chroma_rebound = st.slider("Chroma Dropout Rebound", 0, 10, 0, key="sb_trans_chroma",
+                                          help="Desaturate → oversaturate with A→B crossfade")
+        trans_scanline_gate = st.slider("Scanline Gate", 0, 10, 0, key="sb_trans_scanline",
+                                         help="Rolling scanline A/B split")
+        trans_micro_jitter = st.slider("Micro Jitter RGB", 0, 10, 0, key="sb_trans_jitter",
+                                        help="Smooth jitter + RGB split ramping with blend")
+        trans_noise_crossfade = st.slider("Noise Threshold Crossfade", 0, 10, 0, key="sb_trans_noise",
+                                           help="Seeded noise map reveal threshold")
 
-    st.sidebar.markdown("### Subject")
-    fg_effect = st.sidebar.slider("Foreground effect", 0, 10, 0, key="sb_fg_effect")
-    subject_invert = st.sidebar.slider("Subject invert", 0, 10, 0, key="sb_subject_invert")
-    subject_particles = st.sidebar.slider("Subject particles", 0, 10, 0, key="sb_subject_particles")
-    edge_pulse = st.sidebar.slider("Edge pulse", 0, 10, 0, key="sb_edge_pulse")
-
-    st.sidebar.markdown("### Color")
-    color_scheme = st.sidebar.selectbox(
-        "Color tint",
-        options=["default", "cold", "warm", "neon", "inverted", "vhs", "sepia", "cyan_magenta", "blood"],
-        index=0,
-        key="sb_color",
-    )
-
-    frame_drift = st.sidebar.slider("Frame Drift", 0, 10, 0, key="sb_frame_drift")
-    rolling = st.sidebar.slider("Rolling Scanlines", 0, 10, 0, key="sb_rolling")
+    with st.sidebar.expander("Subject", expanded=False):
+        fg_effect = st.slider("Foreground effect", 0, 10, 0, key="sb_fg_effect",
+                               help="Subtle RGB shift and grain on masked subject")
+        subject_invert = st.slider("Subject invert", 0, 10, 0, key="sb_subject_invert",
+                                    help="Invert subject colors with pulsing blend")
+        subject_particles = st.slider("Subject particles", 0, 10, 0, key="sb_subject_particles",
+                                       help="Particle overlay with size variation and motion")
+        edge_pulse = st.slider("Edge pulse", 0, 10, 0, key="sb_edge_pulse",
+                                help="Chromatic pulse on mask edge band")
 
     params_dict = {
         "rgb_shift_intensity": rgb_shift,
@@ -361,10 +452,25 @@ def render_sidebar():
         "abyss_window": abyss_window,
         "fft_jitter": fft_jitter,
         "moire_grid": moire_grid,
+        "displacement_map": displacement_map,
+        "color_halftone": color_halftone,
+        "temporal_echo": temporal_echo,
         "shader_necrotic_iridescent_flow_intensity": shader_necrotic,
         "shader_hexagonal_warp_intensity": shader_hexagonal,
         "shader_caustic_flow_intensity": shader_caustic,
         "shader_thermal_distort_intensity": shader_thermal,
+        "shader_void_tendrils_intensity": shader_void,
+        "shader_spectral_prism_intensity": shader_prism,
+        "shader_soul_fire_intensity": shader_fire,
+        "shader_electric_arc_intensity": shader_electric,
+        "shader_dimensional_rift_intensity": shader_rift,
+        "shader_glitch_hologram_intensity": shader_hologram,
+        "shader_crystalline_frost_intensity": shader_frost,
+        "shader_pixel_rain_intensity": shader_pixel_rain,
+        "shader_liquid_metal_intensity": shader_liquid_metal,
+        "shader_data_corruption_intensity": shader_data_corrupt,
+        "shader_vhs_rewind_intensity": shader_vhs_rewind,
+        "shader_holographic_foil_intensity": shader_holo_foil,
         "transition_band_wipe": trans_band_wipe,
         "transition_diagonal_rip": trans_diagonal_rip,
         "transition_slit_scan_swap": trans_slit_scan,
@@ -424,7 +530,7 @@ def get_sample_images():
 # Main Tabs
 # =============================================================================
 
-tabs = ["🎲 Series Generator", "🖼️ Photos → GIF", "🖼️ Gallery", "📺 GIF Overlay", "📜 CLI & Batch"]
+tabs = ["🎲 NFT Series", "🎨 Custom GIF", "🖼️ Gallery", "📺 GIF Overlay", "📜 CLI & Batch"]
 tab1, tab2, tab3, tab4, tab5 = st.tabs(tabs)
 
 
@@ -458,6 +564,8 @@ with tab1:
                 key="sg_preset_mode",
             )
             series_use_mask = st.checkbox("Use auto-detect mask (protect subject)", value=False, key="sg_use_mask")
+            series_frame_duration = st.slider("Frame duration (ms)", 100, 500, 300, 50, key="sg_frame_dur",
+                                               help="Time each image stays on screen")
             seed = st.number_input("Random seed (optional)", min_value=0, value=0, key="sg_seed", help="0 = random each time")
             use_seed = seed if seed != 0 else None
 
@@ -508,7 +616,7 @@ with tab1:
                         [str(base_path), str(alt_path)],
                         str(gif_path),
                         params,
-                        frame_duration_ms=300,
+                        frame_duration_ms=series_frame_duration,
                         static_frames_per_image=6,
                         progress_callback=update_progress,
                         bypass_mask=not series_use_mask,
@@ -540,6 +648,8 @@ with tab1:
         batch_use_seed = batch_seed if batch_seed != 0 else None
         batch_use_mask = st.checkbox("Use auto-detect mask (protect subject)", value=False, key="batch_use_mask")
 
+        if batch_count > 10:
+            st.warning(f"Generating {batch_count} GIFs may take a while. Estimated: ~{batch_count * 15}s")
         if st.button("⚡ GENERATE BATCH GIFs ⚡", use_container_width=True, key="batch_btn"):
             out_dir = Path(batch_out)
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -637,7 +747,7 @@ with tab1:
 # -----------------------------------------------------------------------------
 
 with tab2:
-    st.markdown("## 🖼️ Photos → GIF")
+    st.markdown("## 🎨 Custom GIF")
     st.markdown("*Upload 2+ photos (PNG/JPG) to compile into a glitched animated GIF*")
     st.markdown("---")
 
@@ -674,17 +784,26 @@ with tab2:
                     if img is not None:
                         st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption=f"Image {i+1}", use_container_width=True)
 
-        frame_duration = st.slider(
-            "Display time per image (ms)", 100, 500, 300, 50, key="gif_duration",
-            help="Total time each image stays on screen",
-        )
-        static_frames = 6  # Fixed: 6 frames per image
-        bypass_mask = st.checkbox(
-            "Bypass mask (apply effects to full image)",
-            value=False,
-            key="gif_bypass",
-            help="Unchecked = auto-detect mask from each image to protect subject",
-        )
+        col_settings1, col_settings2 = st.columns(2)
+        with col_settings1:
+            frame_duration = st.slider(
+                "Display time per image (ms)", 100, 500, 300, 50, key="gif_duration",
+                help="Total time each image stays on screen",
+            )
+            resolution = st.selectbox(
+                "Output resolution", options=list(RESOLUTION_OPTIONS.keys()),
+                index=1, key="gif_resolution",
+                help="Higher resolution = larger file size",
+            )
+        with col_settings2:
+            use_dithering = st.checkbox("Floyd-Steinberg dithering", value=False, key="gif_dither",
+                                         help="Smoother color gradients in GIF (slightly larger file)")
+            bypass_mask = st.checkbox(
+                "Bypass mask (full image)", value=False, key="gif_bypass",
+                help="Unchecked = auto-detect mask to protect subject",
+            )
+        static_frames = 6
+        output_size = RESOLUTION_OPTIONS[resolution]
         if not bypass_mask:
             st.caption("Using auto-detect mask (edge detection) to protect subject from glitch effects.")
 
@@ -709,9 +828,12 @@ with tab2:
                     progress_callback=update_progress,
                     bypass_mask=bypass_mask,
                     mask_path=None,
+                    output_size=output_size,
+                    use_dithering=use_dithering,
                 )
                 st.session_state.processed_gif = gif_path
                 st.session_state.processed_gif_as_mp4 = None
+                st.session_state.processed_gif_as_webp = None
                 progress_bar.progress(1.0)
                 status_text.text("Done!")
                 st.success("Glitched GIF ready!")
@@ -724,11 +846,11 @@ with tab2:
             st.markdown("### Result")
             st.image(st.session_state.processed_gif, use_container_width=True)
             st.markdown("### Download")
-            dl_col1, dl_col2 = st.columns(2)
+            dl_col1, dl_col2, dl_col3 = st.columns(3)
             with dl_col1:
                 with open(st.session_state.processed_gif, "rb") as f:
                     st.download_button(
-                        "⬇️ Download as GIF",
+                        "⬇️ GIF",
                         f,
                         file_name="liche_glitched.gif",
                         mime="image/gif",
@@ -736,6 +858,33 @@ with tab2:
                         key="dl_gif_gif",
                     )
             with dl_col2:
+                if st.session_state.get("processed_gif_as_webp") is None:
+                    with st.spinner("Converting to WebP..."):
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".webp") as tmp:
+                            from PIL import Image as _PILImg
+                            gif = _PILImg.open(st.session_state.processed_gif)
+                            pil_frames = []
+                            try:
+                                while True:
+                                    pil_frames.append(gif.copy().convert("RGB"))
+                                    gif.seek(gif.tell() + 1)
+                            except EOFError:
+                                pass
+                            if pil_frames:
+                                save_as_webp(pil_frames, tmp.name, frame_duration // static_frames,
+                                             quality=80, target_size=output_size)
+                            st.session_state.processed_gif_as_webp = tmp.name
+                if st.session_state.get("processed_gif_as_webp"):
+                    with open(st.session_state.processed_gif_as_webp, "rb") as f:
+                        st.download_button(
+                            "⬇️ WebP",
+                            f,
+                            file_name="liche_glitched.webp",
+                            mime="image/webp",
+                            use_container_width=True,
+                            key="dl_gif_webp",
+                        )
+            with dl_col3:
                 if st.session_state.get("processed_gif_as_mp4") is None:
                     with st.spinner("Converting to MP4..."):
                         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
@@ -744,7 +893,7 @@ with tab2:
                 if st.session_state.processed_gif_as_mp4:
                     with open(st.session_state.processed_gif_as_mp4, "rb") as f:
                         st.download_button(
-                            "⬇️ Download as MP4",
+                            "⬇️ MP4",
                             f,
                             file_name="liche_glitched.mp4",
                             mime="video/mp4",

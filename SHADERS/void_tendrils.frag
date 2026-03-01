@@ -27,8 +27,7 @@ float snoise(vec2 v) {
     i = mod289(i);
     vec3 p = permute(permute(i.y + vec3(0.0, i1.y, 1.0)) + i.x + vec3(0.0, i1.x, 1.0));
     vec3 m = max(0.5 - vec3(dot(x0, x0), dot(x12.xy, x12.xy), dot(x12.zw, x12.zw)), 0.0);
-    m = m * m;
-    m = m * m;
+    m = m * m; m = m * m;
     vec3 x = 2.0 * fract(p * C.www) - 1.0;
     vec3 h = abs(x) - 0.5;
     vec3 ox = floor(x + 0.5);
@@ -40,79 +39,61 @@ float snoise(vec2 v) {
     return 130.0 * dot(m, g);
 }
 
-float hash(vec2 p) {
-    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
-}
-
 float fbm(vec2 p) {
     float v = 0.0, a = 0.5;
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 6; i++) {
         v += a * (snoise(p) * 0.5 + 0.5);
-        p *= 2.0;
-        a *= 0.5;
+        p *= 2.1; a *= 0.48;
     }
     return v;
-}
-
-float caustic_pattern(vec2 uv, float t) {
-    vec2 i = floor(uv);
-    vec2 f = fract(uv);
-    float d1 = 10.0, d2 = 10.0;
-    for (int x = -2; x <= 2; x++) {
-        for (int y = -2; y <= 2; y++) {
-            vec2 n = vec2(float(x), float(y));
-            vec2 p = vec2(hash(i + n), hash(i + n + 100.0));
-            p = 0.5 + 0.5 * sin(t * 0.9 + 6.28 * p);
-            float d = length(f - n - p);
-            if (d < d1) { d2 = d1; d1 = d; }
-            else if (d < d2) { d2 = d; }
-        }
-    }
-    return d2 - d1;
 }
 
 void main() {
     float mask_val = texture(u_mask, v_uv).r;
     vec4 orig = texture(u_texture, v_uv);
-
     float mask_effect = 1.0 - smoothstep(0.3, 0.7, mask_val);
     if (mask_effect < 0.001) { fragColor = orig; return; }
 
     float t = u_time + float(u_frame_idx) * 0.15;
-    float pulse = 0.7 + 0.3 * sin(t * 1.5);
+    float pulse = 0.7 + 0.3 * sin(t * 1.2);
     float inten = u_intensity * pulse;
 
     vec2 uv = v_uv;
-    vec2 warp;
-    warp.x = sin(uv.y * 8.0 + t * 2.0) * cos(uv.x * 6.0 + t * 1.4);
-    warp.y = cos(uv.x * 8.0 + t * 1.7) * sin(uv.y * 6.0 + t * 1.2);
-    warp += vec2(fbm(uv * 5.0 + t * 0.6), fbm(uv * 5.0 + t * 0.6 + 30.0)) - 0.5;
-    uv += warp * inten * 0.12 * mask_effect;
+    vec2 center = vec2(0.5, 0.5);
+    float dist_center = length(uv - center);
+
+    vec2 q = vec2(fbm(uv * 3.0 + t * 0.2), fbm(uv * 3.0 + t * 0.15 + 40.0));
+    vec2 r = vec2(fbm(uv * 3.0 + q * 4.0 + t * 0.1), fbm(uv * 3.0 + q * 4.0 + t * 0.2 + 60.0));
+    vec2 s = vec2(fbm(uv * 3.0 + r * 3.0 + t * 0.08), fbm(uv * 3.0 + r * 3.0 + t * 0.12 + 80.0));
+
+    float edge_creep = smoothstep(0.05, 0.4, dist_center);
+    float eff = inten + 0.15;
+
+    uv += (s - 0.5) * eff * 0.25 * mask_effect * edge_creep;
     uv = clamp(uv, 0.002, 0.998);
 
     vec4 tex = texture(u_texture, uv);
-
     vec4 feedback = texture(u_feedback, v_uv);
-    tex = mix(tex, feedback, inten * 0.35);
+    tex = mix(tex, feedback, eff * 0.4);
 
-    float c1 = caustic_pattern(v_uv * 6.0, t);
-    float c2 = caustic_pattern(v_uv * 4.0 + 10.0, t * 0.7);
-    float c3 = caustic_pattern(v_uv * 8.0 + 25.0, t * 1.3);
-    float caustic = pow(c1, 1.2) * 0.5 + pow(c2, 1.2) * 0.3 + pow(c3, 1.5) * 0.2;
-    caustic = pow(caustic, 0.7);
+    float tendril = pow(fbm(v_uv * 6.0 + s * 3.0 + t * 0.15), 1.2);
+    float vein = smoothstep(0.42, 0.58, fbm(v_uv * 10.0 + t * 0.25));
+    float dark_tendril = tendril * edge_creep;
 
-    vec3 deep = vec3(0.05, 0.2, 0.35);
-    vec3 bright = vec3(0.4, 0.95, 1.0);
-    vec3 highlight = vec3(1.0, 1.0, 0.95);
-    vec3 cc = mix(deep, bright, caustic);
-    cc = mix(cc, highlight, pow(caustic, 3.0));
+    vec3 void_black = vec3(0.02, 0.01, 0.03);
+    vec3 tendril_purple = vec3(0.2, 0.03, 0.3);
+    vec3 tendril_deep = vec3(0.08, 0.0, 0.15);
 
-    tex.rgb += cc * caustic * inten * 1.2 * mask_effect;
+    float flow_phase = fract(t * 0.06 + tendril * 0.5);
+    vec3 tendril_color = mix(tendril_deep, tendril_purple, flow_phase);
 
-    tex.rgb = mix(tex.rgb, tex.rgb * vec3(0.8, 1.0, 1.15), inten * 0.3 * mask_effect);
+    tex.rgb = mix(tex.rgb, void_black, dark_tendril * eff * 1.5 * mask_effect);
+    tex.rgb += tendril_color * vein * eff * 0.8 * mask_effect * edge_creep;
 
-    float sparkle = pow(max(caustic - 0.6, 0.0) / 0.4, 4.0);
-    tex.rgb += vec3(0.8, 1.0, 1.0) * sparkle * inten * 0.5 * mask_effect;
+    float core_glow = pow(max(tendril - 0.3, 0.0) * 1.5, 2.0);
+    tex.rgb += vec3(0.3, 0.0, 0.5) * core_glow * eff * 0.6 * mask_effect;
+
+    tex.rgb *= 1.0 - eff * 0.2 * mask_effect * edge_creep;
 
     fragColor = mix(orig, tex, mask_effect);
 }

@@ -24,7 +24,14 @@ from transition_effects import apply_transition, pick_transition
 
 GIF_MAX_BYTES = 15 * 1024 * 1024  # 15 MB limit
 GIF_TARGET_BYTES = 700 * 1024  # 700 KB target for Series Generator
-GIF_TARGET_SIZE = (512, 512)  # All outputs at same size
+GIF_TARGET_SIZE = (512, 512)  # Default output size
+
+RESOLUTION_OPTIONS = {
+    "256x256": (256, 256),
+    "512x512": (512, 512),
+    "768x768": (768, 768),
+    "1024x1024": (1024, 1024),
+}
 
 # Background effects (apply to full image when mask bypassed)
 BACKGROUND_EFFECT_KEYS = [
@@ -69,6 +76,14 @@ BACKGROUND_EFFECT_KEYS = [
     "shader_hexagonal_warp_intensity",
     "shader_caustic_flow_intensity",
     "shader_thermal_distort_intensity",
+    "shader_pixel_rain_intensity",
+    "shader_liquid_metal_intensity",
+    "shader_data_corruption_intensity",
+    "shader_vhs_rewind_intensity",
+    "shader_holographic_foil_intensity",
+    "displacement_map",
+    "color_halftone",
+    "temporal_echo",
 ]
 
 # Foreground-only effects (require mask; ignored when bypass_mask=True)
@@ -147,30 +162,77 @@ def _effects_disabled(params: GlitchParams) -> bool:
         and params.shader_hexagonal_warp_intensity == 0
         and params.shader_caustic_flow_intensity == 0
         and params.shader_thermal_distort_intensity == 0
+        and params.shader_void_tendrils_intensity == 0
+        and params.shader_spectral_prism_intensity == 0
+        and params.shader_soul_fire_intensity == 0
+        and params.shader_electric_arc_intensity == 0
+        and params.shader_dimensional_rift_intensity == 0
+        and params.shader_glitch_hologram_intensity == 0
+        and params.shader_crystalline_frost_intensity == 0
+        and params.shader_pixel_rain_intensity == 0
+        and params.shader_liquid_metal_intensity == 0
+        and params.shader_data_corruption_intensity == 0
+        and params.shader_vhs_rewind_intensity == 0
+        and params.shader_holographic_foil_intensity == 0
+        and params.displacement_map == 0
+        and params.color_halftone == 0
+        and params.temporal_echo == 0
         and params.color_scheme in (None, "", "default", "custom")
     )
 
 
 def _build_global_palette(frames: list, colors: int = 256) -> "PILImage.Image | None":
-    """Build one palette from all frames for consistent colors (no per-frame shimmer)."""
+    """Build one palette from all frames using random sampling for better color coverage."""
     if not frames or colors < 2:
         return None
     h, w = frames[0].size[1], frames[0].size[0]
-    step = max(2, int((h * w * len(frames) / (colors * 100)) ** 0.5))
-    pixels = []
+    n_samples_per_frame = min(h * w, max(colors * 8, 4096))
+    rng = np.random.RandomState(42)
+    all_pixels = []
     for img in frames:
         rgb = img.convert("RGB") if img.mode != "RGB" else img
-        arr = np.array(rgb)
-        for y in range(0, h, step):
-            for x in range(0, w, step):
-                pixels.append(arr[y, x])
+        arr = np.array(rgb).reshape(-1, 3)
+        indices = rng.choice(len(arr), min(n_samples_per_frame, len(arr)), replace=False)
+        all_pixels.append(arr[indices])
+    pixels = np.concatenate(all_pixels, axis=0)
+    pixels = pixels[:min(len(pixels), 512 * 512)]
     if len(pixels) < colors:
         return None
-    pixels = np.array(pixels[: min(len(pixels), 512 * 512)], dtype=np.uint8)
     n = len(pixels)
     side = int(n ** 0.5)
-    combined = PILImage.fromarray(pixels[: side * side].reshape(side, side, 3), mode="RGB")
-    return combined.quantize(colors=colors, method=1)
+    combined = PILImage.fromarray(pixels[:side * side].reshape(side, side, 3), mode="RGB")
+    return combined.quantize(colors=colors, method=2)
+
+
+def _frame_similarity(frames: list) -> list[float]:
+    """Compute mean absolute difference between consecutive frames. Lower = more similar."""
+    diffs = []
+    for i in range(1, len(frames)):
+        a = np.array(frames[i - 1].convert("RGB"), dtype=np.float32)
+        b = np.array(frames[i].convert("RGB"), dtype=np.float32)
+        diffs.append(float(np.mean(np.abs(a - b))))
+    return diffs
+
+
+def _drop_similar_frames(frames: list, target_count: int) -> tuple[list, int]:
+    """Drop most-similar consecutive frames, return (reduced_frames, duration_multiplier)."""
+    if len(frames) <= target_count:
+        return frames, 1
+    diffs = _frame_similarity(frames)
+    n_drop = len(frames) - target_count
+    drop_indices = set()
+    for _ in range(n_drop):
+        best_i = None
+        best_val = float("inf")
+        for i, d in enumerate(diffs):
+            if (i + 1) not in drop_indices and d < best_val:
+                best_val = d
+                best_i = i + 1
+        if best_i is not None:
+            drop_indices.add(best_i)
+    result = [f for i, f in enumerate(frames) if i not in drop_indices]
+    multiplier = max(1, round(len(frames) / max(1, len(result))))
+    return result, multiplier
 
 
 def _save_gif_under_size(
@@ -180,28 +242,26 @@ def _save_gif_under_size(
     max_bytes: int = GIF_MAX_BYTES,
     target_size: tuple[int, int] | None = GIF_TARGET_SIZE,
     global_palette: bool = True,
+    use_dithering: bool = False,
 ) -> str:
-    """Save GIF at target_size with global palette (one palette for all frames = no shimmer)."""
+    """Save GIF with global palette. Smarter frame decimation drops least-changed frames first."""
+    dither_mode = 1 if use_dithering else 0
+
     def save_frames(frames: list, path: str, dur: int, colors: int = 256, palette_ref: "PILImage.Image | None" = None) -> int:
         if not frames:
             return 0
         if palette_ref is not None and palette_ref.mode == "P":
-            # Apply same palette to all frames = no per-frame color shift
             quantized = []
             try:
                 for f in frames:
                     rgb = f.convert("RGB") if f.mode != "RGB" else f
-                    q = rgb.quantize(palette=palette_ref, dither=0)
+                    q = rgb.quantize(palette=palette_ref, dither=dither_mode)
                     quantized.append(q)
             except (ValueError, TypeError, OSError):
-                # Fallback: palette quantize can hang/fail on some Pillow versions
                 palette_ref = None
         if palette_ref is None:
-            first = frames[0]
-            if first.mode != "P":
-                quantized = [f.quantize(colors=colors, method=1) if f.mode != "P" else f for f in frames]
-            else:
-                quantized = [f.quantize(colors=colors, method=1) for f in frames]
+            quantized = [f.quantize(colors=colors, method=2, dither=dither_mode)
+                         if f.mode != "P" else f for f in frames]
         quantized[0].save(
             path,
             save_all=True,
@@ -215,7 +275,6 @@ def _save_gif_under_size(
     frames = [f.copy() for f in pil_frames]
     resample = PILImage.LANCZOS
 
-    # Resize to target size so all outputs are identical dimensions
     if target_size and frames[0].size != target_size:
         frames = [f.resize(target_size, resample) for f in frames]
 
@@ -228,22 +287,19 @@ def _save_gif_under_size(
                 palette_ref = None
         return save_frames(frames_list, output_path, dur, n_colors, palette_ref)
 
-    # Try progressively more aggressive color reduction (no scaling - keep same size)
     for colors in (256, 128, 64, 32):
         size = try_save(frames, duration, colors)
         if size <= max_bytes:
             return output_path
 
-    # Fewer frames
-    reduced = frames[::2]
-    dur2 = duration * 2
+    reduced, mult = _drop_similar_frames(frames, len(frames) * 2 // 3)
     for colors in (128, 64, 32):
-        size = try_save(reduced, dur2, colors)
+        size = try_save(reduced, duration * mult, colors)
         if size <= max_bytes:
             return output_path
 
-    reduced_more = frames[::3]
-    try_save(reduced_more, duration * 3, 32)
+    reduced_more, mult2 = _drop_similar_frames(frames, len(frames) // 3)
+    try_save(reduced_more, duration * mult2, 32)
     return output_path
 
 
@@ -292,12 +348,17 @@ def process_images_to_gif(
     bypass_mask: bool = False,
     mask_path: Optional[str] = None,
     max_bytes: Optional[int] = None,
+    output_size: Optional[tuple[int, int]] = None,
+    use_dithering: bool = False,
 ) -> str:
     """
     Build glitched GIF from images. Zero effects → clean GIF from originals.
     bypass_mask: if True, apply effects to full image (no foreground protection).
     mask_path: if set, use this mask file (255=protected, 0=glitch) instead of auto-mask.
+    output_size: (w, h) for output resolution, defaults to GIF_TARGET_SIZE.
+    use_dithering: if True, apply Floyd-Steinberg dithering for smoother color gradients.
     """
+    target_sz = output_size or GIF_TARGET_SIZE
     if not image_paths:
         raise ValueError("No images provided")
 
@@ -308,7 +369,8 @@ def process_images_to_gif(
         pil = [PILImage.fromarray(cv2.cvtColor(f, cv2.COLOR_BGR2RGB)) for f in frames]
         sub_dur = max(20, frame_duration_ms // static_frames_per_image)
         expanded = [p for p in pil for _ in range(static_frames_per_image)]
-        _save_gif_under_size(expanded, output_path, sub_dur, max_bytes or GIF_MAX_BYTES, global_palette=True)
+        _save_gif_under_size(expanded, output_path, sub_dur, max_bytes or GIF_MAX_BYTES,
+                             target_size=target_sz, global_palette=True, use_dithering=use_dithering)
         if progress_callback:
             progress_callback(1.0, "Zero effects — copied to GIF")
         return output_path
@@ -323,28 +385,27 @@ def process_images_to_gif(
     n_images = len(frames_bgr)
     total = n_images * static_frames_per_image
     sub_dur = max(20, frame_duration_ms // static_frames_per_image)
+    transition_frames = min(3, static_frames_per_image // 2)
 
     processed: list[np.ndarray] = []
     prev: Optional[np.ndarray] = None
 
     for i, frame in enumerate(frames_bgr):
         if bypass_mask:
-            # All zeros = no protected area, effects apply to full image
             mask_bin = np.zeros((frame.shape[0], frame.shape[1]), dtype=np.uint8)
         elif mask_path:
-            # Use mask file (255 = protected, 0 = glitch zone)
             mask_bin = _load_mask_for_frame(mask_path, frame.shape)
         else:
-            # Auto-detect mask from frame (old behavior)
             mask_bin = create_auto_mask(frame, use_background_subtraction=True, sensitivity=0.5, face_safe=True)
             _, mask_bin = cv2.threshold(mask_bin, 127, 255, cv2.THRESH_BINARY)
 
         for k in range(static_frames_per_image):
             idx = i * static_frames_per_image + k
             fp = vary_params_for_frame(params, idx)
-            is_boundary = i > 0 and k == 0
+            is_transition = i > 0 and k < transition_frames and prev is not None
             frame_to_process = frame
-            if is_boundary and prev is not None:
+            if is_transition:
+                t = (k + 1) / (transition_frames + 1)
                 weights = {
                     "band_wipe": fp.transition_band_wipe,
                     "diagonal_rip": fp.transition_diagonal_rip,
@@ -363,7 +424,7 @@ def process_images_to_gif(
                 if chosen:
                     intensity = weights.get(chosen, 1)
                     frame_to_process = apply_transition(
-                        prev, frame, mask_bin, t=1.0,
+                        prev, frame, mask_bin, t=t,
                         transition_name=chosen, intensity=min(10, intensity), seed=idx * 3313,
                     )
             out = process_frame(frame_to_process, mask_bin, fp, idx, prev)
@@ -373,8 +434,8 @@ def process_images_to_gif(
         prev = frame
 
     pil_frames = [PILImage.fromarray(p) for p in processed]
-    use_global = True
-    _save_gif_under_size(pil_frames, output_path, sub_dur, max_bytes or GIF_MAX_BYTES, global_palette=use_global)
+    _save_gif_under_size(pil_frames, output_path, sub_dur, max_bytes or GIF_MAX_BYTES,
+                         target_size=target_sz, global_palette=True, use_dithering=use_dithering)
     return output_path
 
 
@@ -456,6 +517,50 @@ def process_images_to_gif_boundary_aware(
 
     pil_frames = [PILImage.fromarray(p) for p in processed]
     _save_gif_under_size(pil_frames, output_path, sub_dur, max_bytes or GIF_MAX_BYTES, global_palette=True)
+    return output_path
+
+
+def save_as_webp(
+    pil_frames: list,
+    output_path: str,
+    duration: int,
+    quality: int = 80,
+    target_size: tuple[int, int] | None = GIF_TARGET_SIZE,
+) -> str:
+    """Save animation as WebP (24-bit color, much smaller than GIF)."""
+    frames = [f.copy() for f in pil_frames]
+    if target_size and frames[0].size != target_size:
+        frames = [f.resize(target_size, PILImage.LANCZOS) for f in frames]
+    rgb_frames = [f.convert("RGB") if f.mode != "RGB" else f for f in frames]
+    rgb_frames[0].save(
+        output_path,
+        save_all=True,
+        append_images=rgb_frames[1:],
+        duration=duration,
+        loop=0,
+        quality=quality,
+    )
+    return output_path
+
+
+def save_as_apng(
+    pil_frames: list,
+    output_path: str,
+    duration: int,
+    target_size: tuple[int, int] | None = GIF_TARGET_SIZE,
+) -> str:
+    """Save animation as APNG (full 24-bit color, no palette limitation)."""
+    frames = [f.copy() for f in pil_frames]
+    if target_size and frames[0].size != target_size:
+        frames = [f.resize(target_size, PILImage.LANCZOS) for f in frames]
+    rgba_frames = [f.convert("RGBA") if f.mode != "RGBA" else f for f in frames]
+    rgba_frames[0].save(
+        output_path,
+        save_all=True,
+        append_images=rgba_frames[1:],
+        duration=duration,
+        loop=0,
+    )
     return output_path
 
 

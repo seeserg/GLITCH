@@ -88,11 +88,22 @@ def _weighted_choice(paths: list[Path]) -> tuple[Path, str]:
     return paths[idx], tiers[idx]
 
 
+_layer_cache: dict | None = None
+_layer_cache_mtime: float = 0.0
+
+
 def _collect_layer_paths() -> dict:
-    """Discover all layer files. Returns dict of category -> list of Paths."""
+    """Discover all layer files with caching. Returns dict of category -> list of Paths."""
+    global _layer_cache, _layer_cache_mtime
     root = SERIES_ROOT
     if not root.exists():
         raise FileNotFoundError(f"Series folder not found: {root}")
+    try:
+        current_mtime = root.stat().st_mtime
+    except OSError:
+        current_mtime = 0.0
+    if _layer_cache is not None and current_mtime == _layer_cache_mtime:
+        return _layer_cache
 
     layers = {
         "base": [],
@@ -136,6 +147,8 @@ def _collect_layer_paths() -> dict:
                 key = subdir.name.lower()
                 layers[key] = sorted(subdir.glob("*.png"))
 
+    _layer_cache = layers
+    _layer_cache_mtime = current_mtime
     return layers
 
 
